@@ -36,6 +36,7 @@ import com.swordfish.lemuroid.lib.storage.StorageFile
 import com.swordfish.lemuroid.lib.storage.StorageProvider
 import com.swordfish.lemuroid.lib.storage.StorageProviderRegistry
 import dagger.Lazy
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.Flow
@@ -60,16 +61,27 @@ class LemuroidLibrary(
     suspend fun indexLibrary() {
         val startedAtMs = System.currentTimeMillis()
 
-        try {
-            indexProviders(startedAtMs)
-        } catch (e: Throwable) {
-            Timber.e(e, "Library indexing stopped due to exception")
-        } finally {
+        val completed =
+            try {
+                indexProviders(startedAtMs)
+                true
+            } catch (_: CancellationException) {
+                // Don't bother adding a stack trace for cancellation, just a simple log
+                Timber.i("Library indexing cancelled")
+                false
+            } catch (e: Throwable) {
+                Timber.e(e, "Library indexing stopped due to exception")
+                false
+            }
+        if (completed) {
             cleanUp(startedAtMs)
+        } else {
+            Timber.w("Skipping clean up, indexing did not reach every file")
         }
 
         val executionTime = System.currentTimeMillis() - startedAtMs
-        Timber.i("Library indexing completed in: $executionTime ms")
+        val outcome = if (completed) "completed" else "interrupted"
+        Timber.i("Library indexing $outcome in: $executionTime ms")
     }
 
     @OptIn(FlowPreview::class)
