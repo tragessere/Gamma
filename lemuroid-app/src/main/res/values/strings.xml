@@ -123,7 +123,7 @@
     <string name="game_manage_data_artwork">Custom artwork</string>
     <string name="game_manage_data_saves">Save data</string>
     <string name="game_manage_data_states">Save states</string>
-    <string name="game_manage_data_extracted_rom">Extracted copy of the game</string>
+    <string name="game_manage_data_extracted_rom">Cached game copy</string>
     <string name="game_manage_data_delete">Delete</string>
     <string name="game_manage_data_confirm_title">Delete selected data?</string>
     <string name="game_manage_data_confirm_message">%1$s will be freed. Save data and save states cannot be recovered, and are also removed from any synced copy.</string>
