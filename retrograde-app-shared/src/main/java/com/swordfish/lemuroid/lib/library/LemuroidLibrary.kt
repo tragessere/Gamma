@@ -342,12 +342,16 @@ class LemuroidLibrary(
      */
     suspend fun refreshCustomCovers(): List<String> =
         withContext(Dispatchers.IO) {
+            // Read once up front, so this costs a listing per system rather than a lookup per game.
+            val storedCovers: Map<String, Uri> =
+                runCatching { gameCoversManager.listCovers() }.getOrDefault(emptyMap())
+
             val updatedGames =
                 retrogradedb
                     .gameDao()
                     .asyncSelectAll()
                     .mapNotNull { game ->
-                        val coverFrontUrl = resolveCoverUrl(game)
+                        val coverFrontUrl = resolveCoverUrl(game, storedCovers)
                         game
                             .copy(coverFrontUrl = coverFrontUrl)
                             .takeIf { coverFrontUrl != game.coverFrontUrl }
@@ -362,8 +366,11 @@ class LemuroidLibrary(
             updatedGames.mapNotNull { it.coverFrontUrl }
         }
 
-    private fun resolveCoverUrl(game: Game): String? {
-        val storedCover = runCatching { gameCoversManager.getCoverUri(game) }.getOrNull()
+    private fun resolveCoverUrl(
+        game: Game,
+        storedCovers: Map<String, Uri>,
+    ): String? {
+        val storedCover = storedCovers[gameCoversManager.coverKey(game)]
 
         if (storedCover != null) {
             return storedCover.toString()

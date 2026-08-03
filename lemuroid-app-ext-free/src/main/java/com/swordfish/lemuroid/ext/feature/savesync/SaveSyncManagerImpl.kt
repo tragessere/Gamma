@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Context
 import com.swordfish.lemuroid.lib.library.CoreID
 import com.swordfish.lemuroid.lib.savesync.SaveSyncManager
+import com.swordfish.lemuroid.lib.savesync.SaveSyncResult
 import com.swordfish.lemuroid.lib.storage.DirectoriesManager
 
 class SaveSyncManagerImpl(
@@ -22,7 +23,7 @@ class SaveSyncManagerImpl(
 
     override fun getConfigInfo(): String = ""
 
-    override suspend fun sync(cores: Set<CoreID>) {}
+    override suspend fun sync(cores: Set<CoreID>) = SaveSyncResult()
 
     override fun computeSavesSpace() = ""
 

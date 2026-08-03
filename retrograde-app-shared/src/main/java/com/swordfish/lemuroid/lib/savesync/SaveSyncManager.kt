@@ -4,6 +4,18 @@ import android.app.Activity
 import android.content.Context
 import com.swordfish.lemuroid.lib.library.CoreID
 import com.swordfish.lemuroid.lib.library.GameSystem
+import java.io.File
+
+/**
+ * What a sync changed on this device, for the callers which have to react to it.
+ *
+ * Empty after a sync which failed outright, since nothing reliable can be said about what it managed
+ * to transfer first.
+ */
+data class SaveSyncResult(
+    /** Custom artwork files this sync downloaded, replaced or removed locally. */
+    val changedCovers: Set<File> = emptySet(),
+)
 
 abstract class SaveSyncManager {
     abstract fun getProvider(): String
@@ -18,7 +30,7 @@ abstract class SaveSyncManager {
 
     abstract fun getConfigInfo(): String
 
-    abstract suspend fun sync(cores: Set<CoreID>)
+    abstract suspend fun sync(cores: Set<CoreID>): SaveSyncResult
 
     abstract fun computeSavesSpace(): String
 

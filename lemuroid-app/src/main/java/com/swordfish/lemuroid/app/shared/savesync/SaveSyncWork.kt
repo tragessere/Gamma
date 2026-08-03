@@ -1,6 +1,7 @@
 package com.swordfish.lemuroid.app.shared.savesync
 
 import android.content.Context
+import androidx.core.net.toUri
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.Data
@@ -18,6 +19,7 @@ import com.swordfish.lemuroid.lib.injection.AndroidWorkerInjection
 import com.swordfish.lemuroid.lib.library.LemuroidLibrary
 import com.swordfish.lemuroid.lib.library.findByName
 import com.swordfish.lemuroid.lib.savesync.SaveSyncManager
+import com.swordfish.lemuroid.lib.savesync.SaveSyncResult
 import dagger.Binds
 import dagger.android.AndroidInjector
 import dagger.multibindings.ClassKey
@@ -54,14 +56,16 @@ class SaveSyncWork(
                 .mapNotNull { findByName(it) }
                 .toSet()
 
-        try {
-            saveSyncManager.sync(coresToSync)
-        } catch (e: Throwable) {
-            Timber.e(e, "Error in saves sync")
-        }
+        val syncResult =
+            try {
+                saveSyncManager.sync(coresToSync)
+            } catch (e: Throwable) {
+                Timber.e(e, "Error in saves sync")
+                SaveSyncResult()
+            }
 
         // Runs even if the sync failed, since it may have transferred some files before giving up.
-        refreshSyncedCovers()
+        refreshSyncedCovers(syncResult)
 
         return Result.success()
     }
@@ -71,21 +75,26 @@ class SaveSyncWork(
      * cover which just arrived (or which the sync deleted) has to be picked up here.
      */
     @OptIn(coil.annotation.ExperimentalCoilApi::class)
-    private suspend fun refreshSyncedCovers() {
-        val changedCovers =
+    private suspend fun refreshSyncedCovers(syncResult: SaveSyncResult) {
+        val reconciledCovers =
             runCatching { lemuroidLibrary.refreshCustomCovers() }
                 .getOrElse {
                     Timber.e(it, "Error while refreshing custom artwork")
-                    return
+                    emptyList()
                 }
 
-        if (changedCovers.isEmpty()) {
+        // Reconciling catches games which changed which image they point at, while the sync reports
+        // the files it rewrote in place. The latter keep the same url, so nothing else would reveal
+        // that what sits behind it is no longer the same picture.
+        val staleCovers = reconciledCovers.toSet() + syncResult.changedCovers.map { it.toUri().toString() }
+
+        if (staleCovers.isEmpty()) {
             return
         }
 
-        // Drop any cached copy so the artwork which just changed hands is displayed as it is now.
+        Timber.i("Invalidating ${staleCovers.size} cached covers")
         val imageLoader = applicationContext.imageLoader
-        changedCovers.forEach { imageLoader.diskCache?.remove(it) }
+        staleCovers.forEach { imageLoader.diskCache?.remove(it) }
         imageLoader.memoryCache?.clear()
     }
 

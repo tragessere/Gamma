@@ -13,6 +13,7 @@ import com.swordfish.lemuroid.ext.R
 import com.swordfish.lemuroid.lib.library.CoreID
 import com.swordfish.lemuroid.lib.preferences.SharedPreferencesHelper
 import com.swordfish.lemuroid.lib.savesync.SaveSyncManager
+import com.swordfish.lemuroid.lib.savesync.SaveSyncResult
 import com.swordfish.lemuroid.lib.storage.DirectoriesManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -62,22 +63,20 @@ class SaveSyncManagerImpl(
         }
     }
 
-    override suspend fun sync(cores: Set<CoreID>): Unit =
+    override suspend fun sync(cores: Set<CoreID>): SaveSyncResult =
         withContext(Dispatchers.IO) {
             synchronized(SYNC_LOCK) {
-                val saveSyncResult =
-                    runCatching {
-                        performSaveSyncForCores(cores)
-                    }
-
-                saveSyncResult.onFailure {
+                runCatching {
+                    performSaveSyncForCores(cores)
+                }.getOrElse {
                     Timber.e(it, "Error while performing save sync.")
+                    SaveSyncResult()
                 }
             }
         }
 
-    private fun performSaveSyncForCores(cores: Set<CoreID>) {
-        val drive = DriveFactory(appContext).create() ?: return
+    private fun performSaveSyncForCores(cores: Set<CoreID>): SaveSyncResult {
+        val drive = DriveFactory(appContext).create() ?: return SaveSyncResult()
 
         syncLocalAndRemoteFolder(
             drive,
@@ -88,12 +87,15 @@ class SaveSyncManagerImpl(
 
         // Custom artwork rides along with the saves. It is small, and a cover the user picked is
         // just as much theirs as a save is.
-        syncLocalAndRemoteFolder(
-            drive,
-            COVERS_FOLDER,
-            directoriesManager.getCoversDirectory(),
-            null,
-        )
+        val coversDirectory = directoriesManager.getCoversDirectory()
+        val changedCovers =
+            syncLocalAndRemoteFolder(
+                drive,
+                COVERS_FOLDER,
+                coversDirectory,
+                null,
+            ).map { File(coversDirectory, it) }
+                .toSet()
 
         if (cores.isNotEmpty()) {
             val corePrefixes = cores.map { it.coreName }.toSet()
@@ -113,6 +115,7 @@ class SaveSyncManagerImpl(
         }
 
         lastSyncTimestamp = System.currentTimeMillis()
+        return SaveSyncResult(changedCovers)
     }
 
     override fun computeSavesSpace() = getSizeHumanReadable(directoriesManager.getSavesDirectory())
@@ -129,12 +132,13 @@ class SaveSyncManagerImpl(
             .formatShortFileSize(appContext, size)
     }
 
+    /** Returns the relative paths whose local copy this sync created, replaced or removed. */
     private fun syncLocalAndRemoteFolder(
         drive: Drive,
         folderName: String,
         localFolder: File,
         prefixes: Set<String>?,
-    ) {
+    ): Set<String> {
         val remoteFolderId = getOrCreateAppDataFolder(folderName)
         val remoteFilesMap = buildRemoteFileMap(getRemoteFiles(drive, remoteFolderId))
         val localFilesMap = buildLocalFileMap(localFolder)
@@ -145,9 +149,10 @@ class SaveSyncManagerImpl(
         // Paths outside the current prefix filter were not looked at, so their baseline has to be
         // carried over untouched rather than dropped.
         val updatedBaseline = previousBaseline.filterKeys { it !in processedKeys }.toMutableMap()
+        val locallyChangedPaths = mutableSetOf<String>()
 
         processedKeys.forEach { relativePath ->
-            val entry =
+            val outcome =
                 handleFileSync(
                     drive = drive,
                     remoteParentFolderId = remoteFolderId,
@@ -157,12 +162,17 @@ class SaveSyncManagerImpl(
                     baseline = previousBaseline[relativePath],
                 )
 
-            if (entry != null) {
-                updatedBaseline[relativePath] = entry
+            if (outcome.baseline != null) {
+                updatedBaseline[relativePath] = outcome.baseline
+            }
+
+            if (outcome.localChanged) {
+                locallyChangedPaths.add(relativePath)
             }
         }
 
         syncBaselineStore.write(folderName, updatedBaseline)
+        return locallyChangedPaths
     }
 
     private fun getFilteredKeys(
@@ -174,9 +184,17 @@ class SaveSyncManagerImpl(
     }
 
     /**
+     * The baseline entry a path should carry from now on (null when it is gone on both sides), plus
+     * whether the local copy was touched, which callers use to invalidate anything derived from it.
+     */
+    private data class FileSyncOutcome(
+        val baseline: BaselineEntry?,
+        val localChanged: Boolean = false,
+    )
+
+    /**
      * Decides what to do with a single path by comparing both sides against the state they had at
-     * the end of the last successful sync. Returns the baseline entry the path should carry from
-     * now on, or null when it is gone on both sides.
+     * the end of the last successful sync.
      */
     private fun handleFileSync(
         drive: Drive,
@@ -185,7 +203,7 @@ class SaveSyncManagerImpl(
         relativePath: String,
         remoteFile: DriveFile?,
         baseline: BaselineEntry?,
-    ): BaselineEntry? {
+    ): FileSyncOutcome {
         val localFile = File(localParentFolder, relativePath)
         val localExists = localFile.isFile
 
@@ -194,20 +212,20 @@ class SaveSyncManagerImpl(
         // An empty file is either a write which was interrupted half way through or the inert zero
         // byte remote which downloadToLocal refuses to fetch. Never let one of those be read as a
         // deletion, or an interrupted write would take the last remaining copy with it.
-        if (localExists && localFile.length() == 0L) return baseline
-        if (remoteFile != null && remoteSize(remoteFile) == 0L) return baseline
+        if (localExists && localFile.length() == 0L) return FileSyncOutcome(baseline)
+        if (remoteFile != null && remoteSize(remoteFile) == 0L) return FileSyncOutcome(baseline)
 
         return runCatching {
             when {
                 remoteFile != null && localExists -> syncExistingPair(drive, remoteFile, localFile)
                 remoteFile != null -> syncRemoteOnly(drive, remoteFile, localFile, baseline)
                 localExists -> syncLocalOnly(drive, remoteParentFolderId, localParentFolder, localFile, baseline)
-                else -> null
+                else -> FileSyncOutcome(null)
             }
         }.getOrElse {
             Timber.e(it, "Error while syncing $relativePath")
             // Keep the previous baseline so a failed operation is never recorded as a success.
-            baseline
+            FileSyncOutcome(baseline)
         }
     }
 
@@ -216,25 +234,27 @@ class SaveSyncManagerImpl(
         drive: Drive,
         remoteFile: DriveFile,
         localFile: File,
-    ): BaselineEntry? {
+    ): FileSyncOutcome {
         if (!areFileDifferent(remoteFile, localFile)) {
-            return entryFor(localFile, remoteFile.modifiedTime.value)
+            return FileSyncOutcome(entryFor(localFile, remoteFile.modifiedTime.value))
         }
 
         return when {
             remoteFile.modifiedTime.value < localFile.lastModified() -> {
                 val updated = onLocalUpdated(localFile, drive, remoteFile)
-                entryFor(localFile, updated.modifiedTime.value)
+                FileSyncOutcome(entryFor(localFile, updated.modifiedTime.value))
             }
 
             remoteFile.modifiedTime.value > localFile.lastModified() -> {
                 onRemoteUpdated(drive, remoteFile, localFile)
-                entryFor(localFile, remoteFile.modifiedTime.value)
+                // The local content was replaced in place, so the path stayed the same while what
+                // it holds did not.
+                FileSyncOutcome(entryFor(localFile, remoteFile.modifiedTime.value), localChanged = true)
             }
 
             // Same timestamp but different content. Leave it alone rather than guess a winner.
             else -> {
-                entryFor(localFile, remoteFile.modifiedTime.value)
+                FileSyncOutcome(entryFor(localFile, remoteFile.modifiedTime.value))
             }
         }
     }
@@ -248,18 +268,18 @@ class SaveSyncManagerImpl(
         remoteFile: DriveFile,
         localFile: File,
         baseline: BaselineEntry?,
-    ): BaselineEntry? {
+    ): FileSyncOutcome {
         // A remote which moved on since the last agreement was changed by another device. A change
         // beats a deletion: an unwanted file can be deleted again, a lost save cannot come back.
         if (baseline == null || !baseline.matchesRemote(remoteFile)) {
             localFile.parentFile?.mkdirs()
             downloadToLocal(drive, remoteFile, localFile)
-            return entryFor(localFile, remoteFile.modifiedTime.value)
+            return FileSyncOutcome(entryFor(localFile, remoteFile.modifiedTime.value), localChanged = true)
         }
 
         Timber.i("Local deletion detected for ${remoteFile.name}. Trashing the remote copy.")
         trashRemote(drive, remoteFile)
-        return null
+        return FileSyncOutcome(null)
     }
 
     /**
@@ -272,15 +292,15 @@ class SaveSyncManagerImpl(
         localParentFolder: File,
         localFile: File,
         baseline: BaselineEntry?,
-    ): BaselineEntry? {
+    ): FileSyncOutcome {
         if (baseline == null || !baseline.matchesLocal(localFile)) {
             val created = onLocalOnly(remoteParentFolderId, localFile, localParentFolder, drive)
-            return entryFor(localFile, created.modifiedTime.value)
+            return FileSyncOutcome(entryFor(localFile, created.modifiedTime.value))
         }
 
         Timber.i("Remote deletion detected for ${localFile.name}. Removing the local copy.")
         localFile.safeDelete()
-        return null
+        return FileSyncOutcome(null, localChanged = true)
     }
 
     private fun entryFor(
