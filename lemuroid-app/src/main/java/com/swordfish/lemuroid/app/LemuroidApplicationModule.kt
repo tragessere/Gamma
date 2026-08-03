@@ -65,6 +65,8 @@ import com.swordfish.lemuroid.lib.saves.StatesManager
 import com.swordfish.lemuroid.lib.saves.StatesPreviewManager
 import com.swordfish.lemuroid.lib.savesync.SaveSyncManager
 import com.swordfish.lemuroid.lib.storage.DirectoriesManager
+import com.swordfish.lemuroid.lib.storage.GameCoversManager
+import com.swordfish.lemuroid.lib.storage.GameFilesManager
 import com.swordfish.lemuroid.lib.storage.StorageProvider
 import com.swordfish.lemuroid.lib.storage.StorageProviderRegistry
 import com.swordfish.lemuroid.lib.storage.local.LocalStorageProvider
@@ -180,7 +182,23 @@ abstract class LemuroidApplicationModule {
             storageProviderRegistry: Lazy<StorageProviderRegistry>,
             gameMetadataProvider: Lazy<GameMetadataProvider>,
             biosManager: BiosManager,
-        ) = LemuroidLibrary(db, storageProviderRegistry, gameMetadataProvider, biosManager)
+            gameCoversManager: GameCoversManager,
+        ) = LemuroidLibrary(db, storageProviderRegistry, gameMetadataProvider, biosManager, gameCoversManager)
+
+        @Provides
+        @PerApp
+        @JvmStatic
+        fun gameCoversManager(directoriesManager: DirectoriesManager) = GameCoversManager(directoriesManager)
+
+        @Provides
+        @PerApp
+        @JvmStatic
+        fun gameFilesManager(
+            context: Context,
+            directoriesManager: DirectoriesManager,
+            db: RetrogradeDatabase,
+            lemuroidLibrary: LemuroidLibrary,
+        ) = GameFilesManager(context, directoriesManager, db, lemuroidLibrary)
 
         @Provides
         @PerApp

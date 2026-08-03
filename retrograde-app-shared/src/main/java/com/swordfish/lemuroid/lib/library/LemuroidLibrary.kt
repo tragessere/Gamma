@@ -27,13 +27,16 @@ import com.swordfish.lemuroid.lib.library.db.entity.DataFile
 import com.swordfish.lemuroid.lib.library.db.entity.Game
 import com.swordfish.lemuroid.lib.library.metadata.GameMetadata
 import com.swordfish.lemuroid.lib.library.metadata.GameMetadataProvider
+import com.swordfish.lemuroid.lib.library.metadata.LibretroCoverUrls
 import com.swordfish.lemuroid.lib.storage.BaseStorageFile
+import com.swordfish.lemuroid.lib.storage.GameCoversManager
 import com.swordfish.lemuroid.lib.storage.GroupedStorageFiles
 import com.swordfish.lemuroid.lib.storage.RomFiles
 import com.swordfish.lemuroid.lib.storage.StorageFile
 import com.swordfish.lemuroid.lib.storage.StorageProvider
 import com.swordfish.lemuroid.lib.storage.StorageProviderRegistry
 import dagger.Lazy
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.asFlow
@@ -43,6 +46,7 @@ import kotlinx.coroutines.flow.flatMapConcat
 import kotlinx.coroutines.flow.flatMapMerge
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.mapNotNull
+import kotlinx.coroutines.withContext
 import timber.log.Timber
 import java.io.InputStream
 
@@ -51,6 +55,7 @@ class LemuroidLibrary(
     private val storageProviderRegistry: Lazy<StorageProviderRegistry>,
     private val gameMetadataProvider: Lazy<GameMetadataProvider>,
     private val biosManager: BiosManager,
+    private val gameCoversManager: GameCoversManager,
 ) {
     suspend fun indexLibrary() {
         val startedAtMs = System.currentTimeMillis()
@@ -243,7 +248,7 @@ class LemuroidLibrary(
                 .mapNotNull { safeStorageFile(provider, it) }
                 .mapNotNull { storageFile ->
                     val metadata = metadataProvider.retrieveMetadata(storageFile)
-                    convertGameMetadataToGame(groupedStorageFile, storageFile, metadata, provider, startedAtMs)
+                    convertGameMetadataToGame(groupedStorageFile, storageFile, metadata, startedAtMs)
                 }.firstOrNull()
 
         return buildScanEntry(groupedStorageFile, game)
@@ -281,7 +286,6 @@ class LemuroidLibrary(
         groupedStorageFile: GroupedStorageFiles,
         storageFile: StorageFile,
         gameMetadata: GameMetadata?,
-        provider: StorageProvider,
         lastIndexedAt: Long,
     ): Game? {
         if (gameMetadata == null) {
@@ -298,9 +302,9 @@ class LemuroidLibrary(
                 storageFile.name
             }
 
-        // A custom artwork image sitting next to the game file takes precedence over the remote cover.
+        // Custom artwork the user picked takes precedence over the remote cover.
         val customArtUrl =
-            runCatching { provider.getGameArtUri(groupedStorageFile.primaryFile.uri) }
+            runCatching { gameCoversManager.getCoverUri(gameSystem.id.dbname, fileName) }
                 .getOrNull()
                 ?.toString()
 
@@ -316,16 +320,83 @@ class LemuroidLibrary(
     }
 
     /**
-     * Writes [inputStream] as custom artwork next to [game]'s file and returns the uri of the stored
-     * image, or null if it could not be written.
+     * Stores [inputStream] as custom artwork for [game] and returns the uri of the stored image, or
+     * null if it could not be written.
      */
     fun writeGameCover(
         game: Game,
         imageExtension: String,
         inputStream: InputStream,
-    ): Uri? {
-        val provider = storageProviderRegistry.get().getProvider(game)
-        return provider.writeGameArt(Uri.parse(game.fileUri), imageExtension, inputStream)
+    ): Uri? = gameCoversManager.writeCover(game, imageExtension, inputStream)
+
+    /** Size in bytes of the custom artwork stored for [game], or 0 if there is none. */
+    fun getGameCoverSize(game: Game): Long = runCatching { gameCoversManager.getCoverSize(game) }.getOrDefault(0L)
+
+    /**
+     * Points every game at the custom artwork currently on disk, returning the cover urls which
+     * changed.
+     *
+     * A scan only resolves covers for games it has already seen once, so artwork which arrived from
+     * a save sync, or which a sync deleted, would otherwise go unnoticed until the game row is
+     * recreated from scratch.
+     */
+    suspend fun refreshCustomCovers(): List<String> =
+        withContext(Dispatchers.IO) {
+            val updatedGames =
+                retrogradedb
+                    .gameDao()
+                    .asyncSelectAll()
+                    .mapNotNull { game ->
+                        val coverFrontUrl = resolveCoverUrl(game)
+                        game
+                            .copy(coverFrontUrl = coverFrontUrl)
+                            .takeIf { coverFrontUrl != game.coverFrontUrl }
+                    }
+
+            if (updatedGames.isEmpty()) {
+                return@withContext emptyList()
+            }
+
+            Timber.i("Refreshing custom artwork for ${updatedGames.size} games")
+            retrogradedb.gameDao().update(updatedGames)
+            updatedGames.mapNotNull { it.coverFrontUrl }
+        }
+
+    private fun resolveCoverUrl(game: Game): String? {
+        val storedCover = runCatching { gameCoversManager.getCoverUri(game) }.getOrNull()
+
+        if (storedCover != null) {
+            return storedCover.toString()
+        }
+
+        // The artwork this game was pointing at is gone, so fall back to the libretro boxart. Games
+        // which never had custom artwork are left untouched, so a cover which legitimately has no
+        // url does not end up pointing at an image which does not exist.
+        if (gameCoversManager.isStoredCover(game.coverFrontUrl)) {
+            return runCatching {
+                LibretroCoverUrls.forGameName(GameSystem.findById(game.systemId), game.title)
+            }.getOrNull()
+        }
+
+        return game.coverFrontUrl
+    }
+
+    /**
+     * Deletes the custom artwork stored for [game] and points the game back at the cover from the
+     * libretro database.
+     *
+     * A scan only resolves covers for games it has never seen before, so the original url has to be
+     * rebuilt here rather than left for the next library scan to restore.
+     */
+    suspend fun deleteGameCover(game: Game): Boolean {
+        if (!gameCoversManager.deleteCover(game)) {
+            return false
+        }
+
+        val system = GameSystem.findById(game.systemId)
+        val originalCover = LibretroCoverUrls.forGameName(system, game.title)
+        retrogradedb.gameDao().update(game.copy(coverFrontUrl = originalCover))
+        return true
     }
 
     private fun removeDeletedDataFiles(startedAtMs: Long) {

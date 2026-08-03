@@ -86,6 +86,15 @@ class SaveSyncManagerImpl(
             null,
         )
 
+        // Custom artwork rides along with the saves. It is small, and a cover the user picked is
+        // just as much theirs as a save is.
+        syncLocalAndRemoteFolder(
+            drive,
+            COVERS_FOLDER,
+            directoriesManager.getCoversDirectory(),
+            null,
+        )
+
         if (cores.isNotEmpty()) {
             val corePrefixes = cores.map { it.coreName }.toSet()
 
@@ -477,6 +486,7 @@ class SaveSyncManagerImpl(
         const val GDRIVE_PROPERTY_LOCAL_PATH = "localPath"
 
         private const val SAVES_FOLDER = "saves"
+        private const val COVERS_FOLDER = "covers"
         private const val STATES_FOLDER = "states"
         private const val STATE_PREVIEWS_FOLDER = "state-previews"
 

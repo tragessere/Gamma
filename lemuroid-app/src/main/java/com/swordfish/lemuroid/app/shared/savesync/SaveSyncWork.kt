@@ -12,8 +12,10 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
+import coil.imageLoader
 import com.swordfish.lemuroid.app.mobile.feature.settings.SettingsManager
 import com.swordfish.lemuroid.lib.injection.AndroidWorkerInjection
+import com.swordfish.lemuroid.lib.library.LemuroidLibrary
 import com.swordfish.lemuroid.lib.library.findByName
 import com.swordfish.lemuroid.lib.savesync.SaveSyncManager
 import dagger.Binds
@@ -36,6 +38,9 @@ class SaveSyncWork(
     @Inject
     lateinit var settingsManager: SettingsManager
 
+    @Inject
+    lateinit var lemuroidLibrary: LemuroidLibrary
+
     override suspend fun doWork(): Result {
         AndroidWorkerInjection.inject(this)
 
@@ -55,7 +60,33 @@ class SaveSyncWork(
             Timber.e(e, "Error in saves sync")
         }
 
+        // Runs even if the sync failed, since it may have transferred some files before giving up.
+        refreshSyncedCovers()
+
         return Result.success()
+    }
+
+    /**
+     * Custom artwork travels with the sync, but the games pointing at it live in the database, so a
+     * cover which just arrived (or which the sync deleted) has to be picked up here.
+     */
+    @OptIn(coil.annotation.ExperimentalCoilApi::class)
+    private suspend fun refreshSyncedCovers() {
+        val changedCovers =
+            runCatching { lemuroidLibrary.refreshCustomCovers() }
+                .getOrElse {
+                    Timber.e(it, "Error while refreshing custom artwork")
+                    return
+                }
+
+        if (changedCovers.isEmpty()) {
+            return
+        }
+
+        // Drop any cached copy so the artwork which just changed hands is displayed as it is now.
+        val imageLoader = applicationContext.imageLoader
+        changedCovers.forEach { imageLoader.diskCache?.remove(it) }
+        imageLoader.memoryCache?.clear()
     }
 
     private suspend fun shouldPerformSaveSync(): Boolean {

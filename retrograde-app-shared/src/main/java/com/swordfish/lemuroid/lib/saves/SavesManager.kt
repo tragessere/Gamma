@@ -62,8 +62,7 @@ class SavesManager(
             File(savesDirectory, fileName)
         }
 
-    /** This name should make it compatible with RetroArch so that users can freely sync saves across the two application. */
-    private fun getSaveRAMFileName(game: Game) = "${game.fileName.substringBeforeLast(".")}.srm"
+    private fun getSaveRAMFileName(game: Game) = SaveFileNames.saveRam(game)
 
     companion object {
         private const val FILE_ACCESS_RETRIES = 3

@@ -114,7 +114,21 @@
     <string name="game_context_menu_restart">Restart</string>
     <string name="game_context_menu_create_shortcut">Pin to launcher</string>
     <string name="game_context_menu_change_artwork">Change artwork</string>
+    <string name="game_context_menu_manage_data">Manage data</string>
     <string name="game_interactor_custom_artwork_failed">Unable to set custom artwork</string>
+
+    <string name="game_manage_data_title">Manage data</string>
+    <string name="game_manage_data_back">Back</string>
+    <string name="game_manage_data_empty">Gamma is not storing any data for this game.</string>
+    <string name="game_manage_data_artwork">Custom artwork</string>
+    <string name="game_manage_data_saves">Save data</string>
+    <string name="game_manage_data_states">Save states</string>
+    <string name="game_manage_data_extracted_rom">Extracted copy of the game</string>
+    <string name="game_manage_data_delete">Delete</string>
+    <string name="game_manage_data_confirm_title">Delete selected data?</string>
+    <string name="game_manage_data_confirm_message">%1$s will be freed. Save data and save states cannot be recovered, and are also removed from any synced copy.</string>
+    <string name="game_manage_data_deleted">Freed %1$s</string>
+    <string name="game_manage_data_delete_failed">Some data could not be deleted</string>
 
     <string name="home_notification_title">Enable notifications</string>
     <string name="home_notification_message">Gamma uses notifications to let you know when a game or operation is running in background.</string>

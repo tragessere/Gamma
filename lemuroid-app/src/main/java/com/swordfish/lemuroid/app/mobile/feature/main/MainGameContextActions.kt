@@ -1,5 +1,6 @@
 package com.swordfish.lemuroid.app.mobile.feature.main
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -22,6 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AppShortcut
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.FolderDelete
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.RestartAlt
@@ -37,6 +39,10 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -46,6 +52,7 @@ import com.swordfish.lemuroid.R
 import com.swordfish.lemuroid.app.mobile.shared.compose.ui.LemuroidGameTexts
 import com.swordfish.lemuroid.app.mobile.shared.compose.ui.LemuroidSmallGameImage
 import com.swordfish.lemuroid.lib.library.db.entity.Game
+import com.swordfish.lemuroid.lib.storage.GameFilesManager
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -57,6 +64,8 @@ fun MainGameContextActions(
     onFavoriteToggle: (Game, Boolean) -> Unit,
     onCreateShortcut: (Game) -> Unit,
     onChangeArtwork: (Game) -> Unit,
+    loadDataSizes: suspend (Game) -> Map<GameFilesManager.GameDataType, Long>,
+    onDeleteData: (Game, Set<GameFilesManager.GameDataType>) -> Unit,
 ) {
     val modalSheetState = rememberModalBottomSheetState(true)
     val selectedGame = selectedGameState.value
@@ -74,18 +83,53 @@ fun MainGameContextActions(
             sheetState = modalSheetState,
             onDismissRequest = { selectedGameState.value = null },
         ) {
-            ContextActionContent(
-                selectedGame = selectedGame,
-                onGamePlay = onGamePlay,
-                selectedGameState = selectedGameState,
-                onGameRestart = onGameRestart,
-                onFavoriteToggle = onFavoriteToggle,
-                shortcutSupported = shortcutSupported,
-                onCreateShortcut = onCreateShortcut,
-                onChangeArtwork = onChangeArtwork,
-            )
+            // Reset every time the sheet is opened, since it leaves composition when dismissed.
+            var page by remember { mutableStateOf(ContextPage.ACTIONS) }
+
+            BackHandler(enabled = page != ContextPage.ACTIONS) {
+                page = ContextPage.ACTIONS
+            }
+
+            Column(
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .windowInsetsPadding(WindowInsets.safeContent.only(WindowInsetsSides.Bottom)),
+            ) {
+                // Shared by every page, so the game being acted on stays visible.
+                ContextActionHeader(game = selectedGame)
+                Divider()
+
+                when (page) {
+                    ContextPage.ACTIONS ->
+                        ContextActionContent(
+                            selectedGame = selectedGame,
+                            onGamePlay = onGamePlay,
+                            selectedGameState = selectedGameState,
+                            onGameRestart = onGameRestart,
+                            onFavoriteToggle = onFavoriteToggle,
+                            shortcutSupported = shortcutSupported,
+                            onCreateShortcut = onCreateShortcut,
+                            onChangeArtwork = onChangeArtwork,
+                            onManageData = { page = ContextPage.MANAGE_DATA },
+                        )
+                    ContextPage.MANAGE_DATA ->
+                        GameManageDataContent(
+                            game = selectedGame,
+                            loadDataSizes = loadDataSizes,
+                            onDeleteData = onDeleteData,
+                            onBack = { page = ContextPage.ACTIONS },
+                            onDismiss = { selectedGameState.value = null },
+                        )
+                }
+            }
         }
     }
+}
+
+private enum class ContextPage {
+    ACTIONS,
+    MANAGE_DATA,
 }
 
 @Composable
@@ -98,15 +142,9 @@ private fun ContextActionContent(
     shortcutSupported: Boolean,
     onCreateShortcut: (Game) -> Unit,
     onChangeArtwork: (Game) -> Unit,
+    onManageData: () -> Unit,
 ) {
-    Column(
-        modifier =
-            Modifier
-                .fillMaxWidth()
-                .windowInsetsPadding(WindowInsets.safeContent.only(WindowInsetsSides.Bottom)),
-    ) {
-        ContextActionHeader(game = selectedGame)
-        Divider()
+    Column(modifier = Modifier.fillMaxWidth()) {
         ContextActionEntry(
             label = stringResource(id = R.string.game_context_menu_resume),
             icon = Icons.Default.PlayArrow,
@@ -163,6 +201,12 @@ private fun ContextActionContent(
                 },
             )
         }
+
+        ContextActionEntry(
+            label = stringResource(id = R.string.game_context_menu_manage_data),
+            icon = Icons.Default.FolderDelete,
+            onClick = onManageData,
+        )
     }
 }
 

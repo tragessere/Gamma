@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Intent
 import android.graphics.Color
 import android.os.Bundle
+import android.text.format.Formatter
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -64,6 +65,7 @@ import com.swordfish.lemuroid.app.shared.main.BusyActivity
 import com.swordfish.lemuroid.app.shared.main.GameLaunchTaskHandler
 import com.swordfish.lemuroid.app.shared.settings.SettingsInteractor
 import com.swordfish.lemuroid.common.coroutines.safeLaunch
+import com.swordfish.lemuroid.common.displayToast
 import com.swordfish.lemuroid.ext.feature.review.ReviewManager
 import com.swordfish.lemuroid.lib.android.RetrogradeComponentActivity
 import com.swordfish.lemuroid.lib.bios.BiosManager
@@ -78,10 +80,13 @@ import com.swordfish.lemuroid.lib.library.skin.DeltaSkinManager
 import com.swordfish.lemuroid.lib.preferences.SharedPreferencesHelper
 import com.swordfish.lemuroid.lib.savesync.SaveSyncManager
 import com.swordfish.lemuroid.lib.storage.DirectoriesManager
+import com.swordfish.lemuroid.lib.storage.GameFilesManager
 import com.swordfish.touchinput.radial.settings.TouchControllerSettingsManager
 import dagger.Provides
 import kotlinx.coroutines.DelicateCoroutinesApi
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 private const val TABLET_SMALLEST_WIDTH_DP = 600
@@ -102,6 +107,9 @@ class MainActivity :
 
     @Inject
     lateinit var gameInteractor: GameInteractor
+
+    @Inject
+    lateinit var gameFilesManager: GameFilesManager
 
     @Inject
     lateinit var biosManager: BiosManager
@@ -444,6 +452,8 @@ class MainActivity :
                 },
                 onCreateShortcut = { gameInteractor.onCreateShortcut(it) },
                 onChangeArtwork = onChangeArtwork,
+                loadDataSizes = { gameFilesManager.computeSizes(it) },
+                onDeleteData = { game, types -> deleteGameData(game, types) },
             )
         }
     }
@@ -451,6 +461,27 @@ class MainActivity :
     override fun activity(): Activity = this
 
     override fun isBusy(): Boolean = mainViewModel.state.value.operationInProgress ?: false
+
+    private fun deleteGameData(
+        game: Game,
+        types: Set<GameFilesManager.GameDataType>,
+    ) {
+        GlobalScope.safeLaunch {
+            val result = gameFilesManager.delete(game, types)
+
+            val message =
+                if (result.failedTypes.isNotEmpty()) {
+                    getString(R.string.game_manage_data_delete_failed)
+                } else {
+                    val freed = Formatter.formatFileSize(this@MainActivity, result.freedBytes)
+                    getString(R.string.game_manage_data_deleted, freed)
+                }
+
+            withContext(Dispatchers.Main) {
+                displayToast(message)
+            }
+        }
+    }
 
     override fun onActivityResult(
         requestCode: Int,
