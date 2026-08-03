@@ -6,6 +6,7 @@ import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.api.client.http.FileContent
 import com.google.api.client.util.DateTime
 import com.google.api.services.drive.Drive
+import com.swordfish.lemuroid.common.files.safeDelete
 import com.swordfish.lemuroid.common.kotlin.SharedPreferencesDelegates
 import com.swordfish.lemuroid.common.kotlin.calculateMd5
 import com.swordfish.lemuroid.ext.R
@@ -19,6 +20,8 @@ import timber.log.Timber
 import java.io.File
 import java.text.SimpleDateFormat
 
+private typealias DriveFile = com.google.api.services.drive.model.File
+
 class SaveSyncManagerImpl(
     private val appContext: Context,
     private val directoriesManager: DirectoriesManager,
@@ -28,6 +31,9 @@ class SaveSyncManagerImpl(
         appContext.getString(com.swordfish.lemuroid.lib.R.string.pref_key_last_save_sync),
         0L,
     )
+
+    private val syncBaselineStore =
+        SyncBaselineStore(File(appContext.filesDir, SyncBaselineStore.BASELINE_FILE_NAME))
 
     override fun getProvider(): String = "Google Drive"
 
@@ -75,23 +81,25 @@ class SaveSyncManagerImpl(
 
         syncLocalAndRemoteFolder(
             drive,
-            getOrCreateAppDataFolder("saves"),
+            SAVES_FOLDER,
             directoriesManager.getSavesDirectory(),
             null,
         )
 
         if (cores.isNotEmpty()) {
+            val corePrefixes = cores.map { it.coreName }.toSet()
+
             syncLocalAndRemoteFolder(
                 drive,
-                getOrCreateAppDataFolder("states"),
+                STATES_FOLDER,
                 directoriesManager.getStatesDirectory(),
-                cores.map { it.coreName }.toSet(),
+                corePrefixes,
             )
             syncLocalAndRemoteFolder(
                 drive,
-                getOrCreateAppDataFolder("state-previews"),
+                STATE_PREVIEWS_FOLDER,
                 directoriesManager.getStatesPreviewDirectory(),
-                cores.map { it.coreName }.toSet(),
+                corePrefixes,
             )
         }
 
@@ -114,17 +122,38 @@ class SaveSyncManagerImpl(
 
     private fun syncLocalAndRemoteFolder(
         drive: Drive,
-        remoteFolderId: String,
+        folderName: String,
         localFolder: File,
         prefixes: Set<String>?,
     ) {
-        val remoteFiles = getRemoteFiles(drive, remoteFolderId)
-        val remoteFilesMap = buildRemoteFileMap(remoteFiles)
+        val remoteFolderId = getOrCreateAppDataFolder(folderName)
+        val remoteFilesMap = buildRemoteFileMap(getRemoteFiles(drive, remoteFolderId))
         val localFilesMap = buildLocalFileMap(localFolder)
 
-        getFilteredKeys(remoteFilesMap.keys + localFilesMap.keys, prefixes).forEach {
-            handleFileSync(drive, remoteFolderId, localFolder, remoteFilesMap[it], localFilesMap[it])
+        val previousBaseline = syncBaselineStore.read(folderName)
+        val processedKeys = getFilteredKeys(remoteFilesMap.keys + localFilesMap.keys, prefixes)
+
+        // Paths outside the current prefix filter were not looked at, so their baseline has to be
+        // carried over untouched rather than dropped.
+        val updatedBaseline = previousBaseline.filterKeys { it !in processedKeys }.toMutableMap()
+
+        processedKeys.forEach { relativePath ->
+            val entry =
+                handleFileSync(
+                    drive = drive,
+                    remoteParentFolderId = remoteFolderId,
+                    localParentFolder = localFolder,
+                    relativePath = relativePath,
+                    remoteFile = remoteFilesMap[relativePath],
+                    baseline = previousBaseline[relativePath],
+                )
+
+            if (entry != null) {
+                updatedBaseline[relativePath] = entry
+            }
         }
+
+        syncBaselineStore.write(folderName, updatedBaseline)
     }
 
     private fun getFilteredKeys(
@@ -135,41 +164,161 @@ class SaveSyncManagerImpl(
         return keys.filter { key -> prefixes.any { key.startsWith(it) } }.toSet()
     }
 
+    /**
+     * Decides what to do with a single path by comparing both sides against the state they had at
+     * the end of the last successful sync. Returns the baseline entry the path should carry from
+     * now on, or null when it is gone on both sides.
+     */
     private fun handleFileSync(
         drive: Drive,
         remoteParentFolderId: String,
         localParentFolder: File,
-        remoteFile: com.google.api.services.drive.model.File?,
-        localFile: File?,
-    ) {
-        Timber.i("Handling file pair: $localFile $remoteFile")
+        relativePath: String,
+        remoteFile: DriveFile?,
+        baseline: BaselineEntry?,
+    ): BaselineEntry? {
+        val localFile = File(localParentFolder, relativePath)
+        val localExists = localFile.isFile
 
-        runCatching {
-            if (remoteFile != null && localFile == null) {
-                onRemoteOnly(localParentFolder, remoteFile, drive)
-            } else if (remoteFile == null && localFile != null) {
-                onLocalOnly(remoteParentFolderId, localFile, localParentFolder, drive)
-            } else if (remoteFile != null && localFile != null) {
-                if (areFileDifferent(remoteFile, localFile)) {
-                    if (remoteFile.modifiedTime.value < localFile.lastModified()) {
-                        onLocalUpdated(localFile, drive, remoteFile)
-                    } else if (remoteFile.modifiedTime.value > localFile.lastModified()) {
-                        onRemoteUpdated(drive, remoteFile, localFile)
-                    }
-                }
+        Timber.i("Handling file pair: $relativePath local=$localExists remote=${remoteFile?.id}")
+
+        // An empty file is either a write which was interrupted half way through or the inert zero
+        // byte remote which downloadToLocal refuses to fetch. Never let one of those be read as a
+        // deletion, or an interrupted write would take the last remaining copy with it.
+        if (localExists && localFile.length() == 0L) return baseline
+        if (remoteFile != null && remoteSize(remoteFile) == 0L) return baseline
+
+        return runCatching {
+            when {
+                remoteFile != null && localExists -> syncExistingPair(drive, remoteFile, localFile)
+                remoteFile != null -> syncRemoteOnly(drive, remoteFile, localFile, baseline)
+                localExists -> syncLocalOnly(drive, remoteParentFolderId, localParentFolder, localFile, baseline)
+                else -> null
+            }
+        }.getOrElse {
+            Timber.e(it, "Error while syncing $relativePath")
+            // Keep the previous baseline so a failed operation is never recorded as a success.
+            baseline
+        }
+    }
+
+    /** Present on both sides: the newer copy wins. */
+    private fun syncExistingPair(
+        drive: Drive,
+        remoteFile: DriveFile,
+        localFile: File,
+    ): BaselineEntry? {
+        if (!areFileDifferent(remoteFile, localFile)) {
+            return entryFor(localFile, remoteFile.modifiedTime.value)
+        }
+
+        return when {
+            remoteFile.modifiedTime.value < localFile.lastModified() -> {
+                val updated = onLocalUpdated(localFile, drive, remoteFile)
+                entryFor(localFile, updated.modifiedTime.value)
+            }
+
+            remoteFile.modifiedTime.value > localFile.lastModified() -> {
+                onRemoteUpdated(drive, remoteFile, localFile)
+                entryFor(localFile, remoteFile.modifiedTime.value)
+            }
+
+            // Same timestamp but different content. Leave it alone rather than guess a winner.
+            else -> {
+                entryFor(localFile, remoteFile.modifiedTime.value)
             }
         }
     }
 
+    /**
+     * Only on the remote. Without a baseline this is a file this device has never seen, but if the
+     * baseline knows it and the remote still matches it, the local copy was deleted on purpose.
+     */
+    private fun syncRemoteOnly(
+        drive: Drive,
+        remoteFile: DriveFile,
+        localFile: File,
+        baseline: BaselineEntry?,
+    ): BaselineEntry? {
+        // A remote which moved on since the last agreement was changed by another device. A change
+        // beats a deletion: an unwanted file can be deleted again, a lost save cannot come back.
+        if (baseline == null || !baseline.matchesRemote(remoteFile)) {
+            localFile.parentFile?.mkdirs()
+            downloadToLocal(drive, remoteFile, localFile)
+            return entryFor(localFile, remoteFile.modifiedTime.value)
+        }
+
+        Timber.i("Local deletion detected for ${remoteFile.name}. Trashing the remote copy.")
+        trashRemote(drive, remoteFile)
+        return null
+    }
+
+    /**
+     * Only local. Without a baseline this is a newly created save, otherwise an unchanged local
+     * copy means the file was deleted from another device.
+     */
+    private fun syncLocalOnly(
+        drive: Drive,
+        remoteParentFolderId: String,
+        localParentFolder: File,
+        localFile: File,
+        baseline: BaselineEntry?,
+    ): BaselineEntry? {
+        if (baseline == null || !baseline.matchesLocal(localFile)) {
+            val created = onLocalOnly(remoteParentFolderId, localFile, localParentFolder, drive)
+            return entryFor(localFile, created.modifiedTime.value)
+        }
+
+        Timber.i("Remote deletion detected for ${localFile.name}. Removing the local copy.")
+        localFile.safeDelete()
+        return null
+    }
+
+    private fun entryFor(
+        localFile: File,
+        remoteModifiedAt: Long,
+    ): BaselineEntry? =
+        if (localFile.isFile && localFile.length() > 0) {
+            BaselineEntry(localFile.length(), localFile.lastModified(), remoteModifiedAt)
+        } else {
+            null
+        }
+
+    private fun BaselineEntry.matchesLocal(localFile: File): Boolean =
+        size == localFile.length() && localModifiedAt == localFile.lastModified()
+
+    private fun BaselineEntry.matchesRemote(remoteFile: DriveFile): Boolean =
+        size == remoteSize(remoteFile) && remoteModifiedAt == remoteFile.modifiedTime.value
+
+    private fun remoteSize(remoteFile: DriveFile): Long = remoteFile.getSize() ?: 0L
+
+    /**
+     * Trashing rather than deleting keeps the file recoverable through the Drive API for 30 days.
+     * [getRemoteFiles] already filters trashed files out, so it disappears from the merge either
+     * way. Note that appDataFolder contents are hidden from the Drive web UI, so this is a safety
+     * net for us rather than something the user can undo themselves.
+     */
+    private fun trashRemote(
+        drive: Drive,
+        remoteFile: DriveFile,
+    ) {
+        val metadata = DriveFile()
+        metadata.trashed = true
+        drive
+            .files()
+            .update(remoteFile.id, metadata)
+            .execute()
+    }
+
     private fun areFileDifferent(
-        remoteFile: com.google.api.services.drive.model.File,
+        remoteFile: DriveFile,
         localFile: File,
     ): Boolean {
         if (remoteFile.modifiedTime.value == localFile.lastModified()) {
             return false
         }
 
-        if (remoteFile.size.toLong() != localFile.length()) {
+        if (remoteSize(remoteFile) != localFile.length()) {
             return true
         }
 
@@ -179,18 +328,17 @@ class SaveSyncManagerImpl(
     private fun onLocalUpdated(
         localFile: File,
         drive: Drive,
-        remoteFile: com.google.api.services.drive.model.File,
-    ) {
+        remoteFile: DriveFile,
+    ): DriveFile {
         Timber.i("Local file updated $localFile")
 
         val mediaContent = FileContent("application/x-binary", localFile)
-        val metadata =
-            com.google.api.services.drive.model
-                .File()
+        val metadata = DriveFile()
         metadata.modifiedTime = DateTime(localFile.lastModified())
-        drive
+        return drive
             .files()
             .update(remoteFile.id, metadata, mediaContent)
+            .setFields(REMOTE_FILE_FIELDS)
             .execute()
     }
 
@@ -199,12 +347,10 @@ class SaveSyncManagerImpl(
         localFile: File,
         localParentFolder: File,
         drive: Drive,
-    ) {
+    ): DriveFile {
         Timber.i("Local-only file detected $localFile")
 
-        val metadata =
-            com.google.api.services.drive.model
-                .File()
+        val metadata = DriveFile()
         metadata.parents = listOf(remoteParentFolderId)
         metadata.name = localFile.name
         metadata.appProperties =
@@ -216,32 +362,16 @@ class SaveSyncManagerImpl(
             )
         metadata.modifiedTime = DateTime(localFile.lastModified())
         val mediaContent = FileContent("application/x-binary", localFile)
-        drive
+        return drive
             .files()
             .create(metadata, mediaContent)
-            .setFields("id")
+            .setFields(REMOTE_FILE_FIELDS)
             .execute()
-    }
-
-    private fun onRemoteOnly(
-        localParentFolder: File,
-        remoteFile: com.google.api.services.drive.model.File,
-        drive: Drive,
-    ) {
-        Timber.i("Remote only file detected $remoteFile")
-        val outputFile =
-            File(
-                localParentFolder,
-                remoteFile.appProperties[GDRIVE_PROPERTY_LOCAL_PATH]!!,
-            ).apply {
-                parentFile?.mkdirs()
-            }
-        downloadToLocal(drive, remoteFile, outputFile)
     }
 
     private fun onRemoteUpdated(
         drive: Drive,
-        remoteFile: com.google.api.services.drive.model.File,
+        remoteFile: DriveFile,
         localFile: File,
     ) {
         Timber.i("Remote file updated $remoteFile")
@@ -250,30 +380,32 @@ class SaveSyncManagerImpl(
 
     private fun downloadToLocal(
         drive: Drive,
-        remoteFile: com.google.api.services.drive.model.File,
+        remoteFile: DriveFile,
         localFile: File,
     ) {
-        if (remoteFile.size == 0) return
+        if (remoteSize(remoteFile) == 0L) return
         Timber.i("Downloading file to $localFile")
-        drive
-            .files()
-            .get(remoteFile.id)
-            .executeMediaAndDownloadTo(localFile.outputStream())
+        localFile.outputStream().use {
+            drive
+                .files()
+                .get(remoteFile.id)
+                .executeMediaAndDownloadTo(it)
+        }
         localFile.setLastModified(remoteFile.modifiedTime.value)
     }
 
-    private fun buildRemoteFileMap(
-        remoteFiles: Sequence<com.google.api.services.drive.model.File>,
-    ): Map<String, com.google.api.services.drive.model.File> =
+    private fun buildRemoteFileMap(remoteFiles: Sequence<DriveFile>): Map<String, DriveFile> =
         remoteFiles
             .filter { it.appProperties?.get(GDRIVE_PROPERTY_LOCAL_PATH) != null }
             .map { it.appProperties?.get(GDRIVE_PROPERTY_LOCAL_PATH)!! to it }
             .toMap()
 
+    // Empty files are deliberately kept here. Filtering them out would make a half written save
+    // indistinguishable from a missing one, which the three way merge would read as a deletion.
     private fun buildLocalFileMap(folder: File): Map<String, File> =
         folder
             .walkBottomUp()
-            .filter { it.exists() && !it.isDirectory && it.length() > 0 }
+            .filter { it.isFile }
             .map { it.toRelativeString(folder) to it }
             .toMap()
 
@@ -295,9 +427,7 @@ class SaveSyncManagerImpl(
             return query.files[0].id
         }
 
-        val metadata =
-            com.google.api.services.drive.model
-                .File()
+        val metadata = DriveFile()
         metadata.parents = listOf("appDataFolder")
         metadata.name = folderName
         metadata.mimeType = "application/vnd.google-apps.folder"
@@ -315,7 +445,7 @@ class SaveSyncManagerImpl(
     private fun getRemoteFiles(
         drive: Drive,
         folderId: String,
-    ): Sequence<com.google.api.services.drive.model.File> {
+    ): Sequence<DriveFile> {
         var pageToken: String? = null
         return sequence {
             do {
@@ -345,6 +475,14 @@ class SaveSyncManagerImpl(
 
     companion object {
         const val GDRIVE_PROPERTY_LOCAL_PATH = "localPath"
+
+        private const val SAVES_FOLDER = "saves"
+        private const val STATES_FOLDER = "states"
+        private const val STATE_PREVIEWS_FOLDER = "state-previews"
+
+        /** Requested on writes so the baseline can record the timestamp Drive actually stored. */
+        private const val REMOTE_FILE_FIELDS = "id, size, modifiedTime"
+
         private val SYNC_LOCK = Object()
     }
 }
