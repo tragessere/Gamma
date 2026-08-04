@@ -1,6 +1,7 @@
 package com.swordfish.lemuroid.app.mobile.feature.main
 
 import android.text.format.Formatter
+import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -9,7 +10,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Bookmarks
@@ -18,7 +18,6 @@ import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Divider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -28,7 +27,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -36,32 +34,43 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.swordfish.lemuroid.R
+import com.swordfish.lemuroid.app.mobile.shared.compose.ui.LemuroidDelayedLoading
 import com.swordfish.lemuroid.lib.library.db.entity.Game
 import com.swordfish.lemuroid.lib.storage.GameFilesManager.GameDataType
+
+private val HEADER_HEIGHT = 56.dp
+private val PLACEHOLDER_HEIGHT = 96.dp
 
 @Composable
 fun GameManageDataContent(
     game: Game,
-    loadDataSizes: suspend (Game) -> Map<GameDataType, Long>,
+    sizes: Map<GameDataType, Long>?,
+    loadingHeight: Dp,
     onDeleteData: (Game, Set<GameDataType>) -> Unit,
     onBack: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val sizes by produceState<Map<GameDataType, Long>?>(initialValue = null, game) {
-        value = loadDataSizes(game)
-    }
-
     var selected by remember { mutableStateOf(emptySet<GameDataType>()) }
     var confirmingDelete by remember { mutableStateOf(false) }
 
-    Column(modifier = Modifier.fillMaxWidth()) {
+    // Sizes are normally ready before this page is shown. When they are not, the page holds the
+    // height of the one it replaced and grows into the entries once they arrive, so the sheet
+    // animates a single time instead of snapping down and back up.
+    Column(modifier = Modifier.fillMaxWidth().animateContentSize()) {
         ManageDataHeader(onBack = onBack)
 
         val currentSizes = sizes
         when {
-            currentSizes == null -> ManageDataLoading()
+            currentSizes == null ->
+                LemuroidDelayedLoading(
+                    modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .height((loadingHeight - HEADER_HEIGHT).coerceAtLeast(PLACEHOLDER_HEIGHT)),
+                )
             currentSizes.isEmpty() -> ManageDataEmpty()
             else ->
                 ManageDataEntries(
@@ -97,7 +106,7 @@ fun GameManageDataContent(
 @Composable
 private fun ManageDataHeader(onBack: () -> Unit) {
     Row(
-        modifier = Modifier.fillMaxWidth().height(56.dp),
+        modifier = Modifier.fillMaxWidth().height(HEADER_HEIGHT),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         IconButton(onClick = onBack) {
@@ -114,19 +123,9 @@ private fun ManageDataHeader(onBack: () -> Unit) {
 }
 
 @Composable
-private fun ManageDataLoading() {
-    Box(
-        modifier = Modifier.fillMaxWidth().height(96.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        CircularProgressIndicator(modifier = Modifier.size(32.dp))
-    }
-}
-
-@Composable
 private fun ManageDataEmpty() {
     Box(
-        modifier = Modifier.fillMaxWidth().height(96.dp).padding(horizontal = 32.dp),
+        modifier = Modifier.fillMaxWidth().height(PLACEHOLDER_HEIGHT).padding(horizontal = 32.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(

@@ -10,8 +10,14 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -30,10 +36,16 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -66,11 +78,27 @@ import javax.inject.Inject
 /** Keeps a sliver of the game visible above the sheet even when every option is shown. */
 private const val MAX_SHEET_HEIGHT_FRACTION = 0.85f
 
+private const val ROUTE_ANIM_DURATION = 250
+
+/** How far across its own width a route slides as it comes and goes. */
+private const val ROUTE_SLIDE_FRACTION = 5
+
 private val HEADER_HEIGHT = 56.dp
 private val HEADER_HORIZONTAL_PADDING = 4.dp
 
 /** Keeps the centered title from running underneath the "Quit" and "Resume" buttons. */
 private val HEADER_TITLE_PADDING = 92.dp
+
+/** Sub routes slide in from the trailing edge, and back out towards it when they are popped. */
+private fun routeEnter(forward: Boolean): EnterTransition =
+    slideInHorizontally(tween(ROUTE_ANIM_DURATION)) { width ->
+        if (forward) width / ROUTE_SLIDE_FRACTION else -width / ROUTE_SLIDE_FRACTION
+    } + fadeIn(tween(ROUTE_ANIM_DURATION))
+
+private fun routeExit(forward: Boolean): ExitTransition =
+    slideOutHorizontally(tween(ROUTE_ANIM_DURATION)) { width ->
+        if (forward) -width / ROUTE_SLIDE_FRACTION else width / ROUTE_SLIDE_FRACTION
+    } + fadeOut(tween(ROUTE_ANIM_DURATION))
 
 class GameMenuActivity : RetrogradeComponentActivity() {
     @Inject
@@ -175,6 +203,11 @@ class GameMenuActivity : RetrogradeComponentActivity() {
             val sheetState = rememberGameMenuSheetState()
             val coroutineScope = rememberCoroutineScope()
 
+            // Lets the state screens hold the sheet at the size of the menu they replaced while
+            // their slots and previews are still being read.
+            var homeHeight by remember { mutableStateOf(0.dp) }
+            val density = LocalDensity.current
+
             // Every action finishes the activity, which would cut the sheet off mid screen. Slide
             // it back down first, then deliver the result.
             val dismissWithResult: (Intent.() -> Unit) -> Unit = { block ->
@@ -208,15 +241,28 @@ class GameMenuActivity : RetrogradeComponentActivity() {
                     if (currentRoute.canGoBack()) {
                         HorizontalDivider(modifier = Modifier.fillMaxWidth())
                     }
+                    // The routes have very different heights, so the sheet animates between them
+                    // rather than snapping to the size of whichever one just arrived.
                     NavHost(
                         modifier = Modifier.fillMaxWidth(),
                         navController = navController,
                         startDestination = GameMenuRoute.HOME.route,
-                        enterTransition = { fadeIn() },
-                        exitTransition = { fadeOut() },
+                        enterTransition = { routeEnter(forward = true) },
+                        exitTransition = { routeExit(forward = true) },
+                        popEnterTransition = { routeEnter(forward = false) },
+                        popExitTransition = { routeExit(forward = false) },
+                        sizeTransform = { SizeTransform { _, _ -> tween(ROUTE_ANIM_DURATION) } },
                     ) {
                         composable(GameMenuRoute.HOME) {
-                            GameMenuHomeScreen(navController, gameMenuRequest, dismissWithResult)
+                            GameMenuHomeScreen(
+                                modifier =
+                                    Modifier.onSizeChanged {
+                                        homeHeight = with(density) { it.height.toDp() }
+                                    },
+                                navController = navController,
+                                gameMenuRequest = gameMenuRequest,
+                                onResult = dismissWithResult,
+                            )
                         }
                         composable(GameMenuRoute.SAVE) {
                             GameMenuStatesScreen(
@@ -230,6 +276,7 @@ class GameMenuActivity : RetrogradeComponentActivity() {
                                             statesPreviewManager,
                                         ),
                                 ),
+                                loadingHeight = homeHeight,
                                 onStateClicked = {
                                     dismissWithResult { putExtra(GameMenuContract.RESULT_SAVE, it) }
                                 },
@@ -247,6 +294,7 @@ class GameMenuActivity : RetrogradeComponentActivity() {
                                             statesPreviewManager,
                                         ),
                                 ),
+                                loadingHeight = homeHeight,
                                 onStateClicked = {
                                     dismissWithResult { putExtra(GameMenuContract.RESULT_LOAD, it) }
                                 },

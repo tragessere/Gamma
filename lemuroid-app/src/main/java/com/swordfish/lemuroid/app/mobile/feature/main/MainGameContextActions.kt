@@ -1,9 +1,17 @@
 package com.swordfish.lemuroid.app.mobile.feature.main
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedContentTransitionScope
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.ContentTransform
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -41,11 +49,14 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.swordfish.lemuroid.R
@@ -79,12 +90,22 @@ fun MainGameContextActions(
     }
 
     if (selectedGame != null) {
+        // Measuring starts when the sheet opens rather than when the data page is reached, so the
+        // sizes are usually ready by then and the sheet doesn't have to resize a second time.
+        val dataSizes by produceState<Map<GameFilesManager.GameDataType, Long>?>(null, selectedGame) {
+            value = loadDataSizes(selectedGame)
+        }
+
         ModalBottomSheet(
             sheetState = modalSheetState,
             onDismissRequest = { selectedGameState.value = null },
         ) {
             // Reset every time the sheet is opened, since it leaves composition when dismissed.
             var page by remember { mutableStateOf(ContextPage.ACTIONS) }
+
+            // Lets the data page hold the sheet at its current size while sizes are still loading.
+            var actionsHeight by remember { mutableStateOf(0.dp) }
+            val density = LocalDensity.current
 
             BackHandler(enabled = page != ContextPage.ACTIONS) {
                 page = ContextPage.ACTIONS
@@ -100,40 +121,68 @@ fun MainGameContextActions(
                 ContextActionHeader(game = selectedGame)
                 Divider()
 
-                when (page) {
-                    ContextPage.ACTIONS ->
-                        ContextActionContent(
-                            selectedGame = selectedGame,
-                            onGamePlay = onGamePlay,
-                            selectedGameState = selectedGameState,
-                            onGameRestart = onGameRestart,
-                            onFavoriteToggle = onFavoriteToggle,
-                            shortcutSupported = shortcutSupported,
-                            onCreateShortcut = onCreateShortcut,
-                            onChangeArtwork = onChangeArtwork,
-                            onManageData = { page = ContextPage.MANAGE_DATA },
-                        )
-                    ContextPage.MANAGE_DATA ->
-                        GameManageDataContent(
-                            game = selectedGame,
-                            loadDataSizes = loadDataSizes,
-                            onDeleteData = onDeleteData,
-                            onBack = { page = ContextPage.ACTIONS },
-                            onDismiss = { selectedGameState.value = null },
-                        )
+                // The pages have very different heights, so the swap animates the sheet between
+                // them instead of letting it snap to the new size.
+                AnimatedContent(
+                    targetState = page,
+                    transitionSpec = { contextPageTransition() },
+                    label = "gameContextPage",
+                ) { currentPage ->
+                    when (currentPage) {
+                        ContextPage.ACTIONS ->
+                            ContextActionContent(
+                                modifier =
+                                    Modifier.onSizeChanged {
+                                        actionsHeight = with(density) { it.height.toDp() }
+                                    },
+                                selectedGame = selectedGame,
+                                onGamePlay = onGamePlay,
+                                selectedGameState = selectedGameState,
+                                onGameRestart = onGameRestart,
+                                onFavoriteToggle = onFavoriteToggle,
+                                shortcutSupported = shortcutSupported,
+                                onCreateShortcut = onCreateShortcut,
+                                onChangeArtwork = onChangeArtwork,
+                                onManageData = { page = ContextPage.MANAGE_DATA },
+                            )
+                        ContextPage.MANAGE_DATA ->
+                            GameManageDataContent(
+                                game = selectedGame,
+                                sizes = dataSizes,
+                                loadingHeight = actionsHeight,
+                                onDeleteData = onDeleteData,
+                                onBack = { page = ContextPage.ACTIONS },
+                                onDismiss = { selectedGameState.value = null },
+                            )
+                    }
                 }
             }
         }
     }
 }
 
+private const val PAGE_ANIM_DURATION = 250
+
 private enum class ContextPage {
     ACTIONS,
     MANAGE_DATA,
 }
 
+private fun AnimatedContentTransitionScope<ContextPage>.contextPageTransition(): ContentTransform {
+    val spec = tween<Float>(PAGE_ANIM_DURATION)
+    val forward = targetState.ordinal > initialState.ordinal
+    val slide = { width: Int -> if (forward) width / 5 else -width / 5 }
+
+    return (
+        slideInHorizontally(tween(PAGE_ANIM_DURATION)) { slide(it) } + fadeIn(spec)
+    ) togetherWith (
+        slideOutHorizontally(tween(PAGE_ANIM_DURATION)) { -slide(it) } + fadeOut(spec)
+    ) using SizeTransform { _, _ -> tween(PAGE_ANIM_DURATION) }
+}
+
 @Composable
 private fun ContextActionContent(
+    modifier: Modifier = Modifier,
     selectedGame: Game,
     onGamePlay: (Game) -> Unit,
     selectedGameState: MutableState<Game?>,
@@ -144,7 +193,7 @@ private fun ContextActionContent(
     onChangeArtwork: (Game) -> Unit,
     onManageData: () -> Unit,
 ) {
-    Column(modifier = Modifier.fillMaxWidth()) {
+    Column(modifier = modifier.fillMaxWidth()) {
         ContextActionEntry(
             label = stringResource(id = R.string.game_context_menu_resume),
             icon = Icons.Default.PlayArrow,
