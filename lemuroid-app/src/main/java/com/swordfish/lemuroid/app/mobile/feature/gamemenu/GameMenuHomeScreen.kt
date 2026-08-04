@@ -25,7 +25,6 @@ private val GRID_VERTICAL_PADDING = 8.dp
 
 @Composable
 fun GameMenuHomeScreen(
-    modifier: Modifier = Modifier,
     navController: NavController,
     gameMenuRequest: GameMenuActivity.GameMenuRequest,
     onResult: (Intent.() -> Unit) -> Unit,
@@ -34,7 +33,7 @@ fun GameMenuHomeScreen(
 
     Column(
         modifier =
-            modifier
+            Modifier
                 .fillMaxWidth()
                 .verticalScroll(rememberScrollState())
                 .padding(vertical = GRID_VERTICAL_PADDING),
