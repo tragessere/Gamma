@@ -12,7 +12,7 @@ android {
     defaultConfig {
         versionCode = 252
         versionName = "1.17.0" // Always remember to update Cores Tag!
-        applicationId = "com.tragessere.gamma"
+        applicationId = "com.tragessere.strata"
     }
     flavorDimensions += listOf("opensource", "cores")
 
@@ -97,12 +97,12 @@ android {
             isShrinkResources = true
             signingConfig = signingConfigs["release"]
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            resValue("string", "lemuroid_name", "Gamma")
+            resValue("string", "lemuroid_name", "Strata")
         }
         getByName("debug") {
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-DEBUG"
-            resValue("string", "lemuroid_name", "GammaDebug")
+            resValue("string", "lemuroid_name", "StrataDebug")
         }
     }
 

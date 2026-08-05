@@ -1,6 +1,6 @@
-# Gamma
+# Strata
 
-Gamma is a fork from the [Lemuroid](https://github.com/swordfish90/lemuroid) open-source Android emulator. This is just some vibe-coded changes
+Strata is a fork from the [Lemuroid](https://github.com/swordfish90/lemuroid) open-source Android emulator. This is just some vibe-coded changes
 that I wanted to see in the emulator. They are mostly updates to add features that I missed having
 from the [Delta emulator](https://github.com/rileytestut/delta) on iOS.
 
