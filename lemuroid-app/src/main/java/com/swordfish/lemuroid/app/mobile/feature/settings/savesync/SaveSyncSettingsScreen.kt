@@ -8,8 +8,10 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.lifecycle.Lifecycle
 import com.swordfish.lemuroid.R
 import com.swordfish.lemuroid.app.shared.savesync.SaveSyncWork
+import com.swordfish.lemuroid.app.utils.android.ComposableLifecycle
 import com.swordfish.lemuroid.app.utils.android.settings.LemuroidCardSettingsGroup
 import com.swordfish.lemuroid.app.utils.android.settings.LemuroidSettingsListMultiSelect
 import com.swordfish.lemuroid.app.utils.android.settings.LemuroidSettingsMenuLink
@@ -24,6 +26,12 @@ fun SaveSyncSettingsScreen(
     viewModel: SaveSyncSettingsViewModel,
 ) {
     val context = LocalContext.current
+
+    // Refresh when returning from the provider's sign in/out activity, so the linked account,
+    // the used space and the enabled state of the rows below reflect the new configuration.
+    ComposableLifecycle { _, event ->
+        if (event == Lifecycle.Event.ON_RESUME) viewModel.refresh()
+    }
 
     val saveSyncState =
         viewModel.uiState

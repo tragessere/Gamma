@@ -9,10 +9,15 @@ import androidx.lifecycle.viewModelScope
 import com.swordfish.lemuroid.app.shared.library.PendingOperationsMonitor
 import com.swordfish.lemuroid.lib.library.CoreID
 import com.swordfish.lemuroid.lib.savesync.SaveSyncManager
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
-import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.flow.stateIn
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class SaveSyncSettingsViewModel(
     private val application: Application,
     private val saveSyncManager: SaveSyncManager,
@@ -38,13 +43,21 @@ class SaveSyncSettingsViewModel(
         val settingsActivity: Class<out Activity>? = null,
     )
 
+    private val refreshTrigger = MutableStateFlow(0)
+
     val uiState =
-        flow { emit(buildState()) }
+        refreshTrigger
+            .mapLatest { buildState() }
+            .flowOn(Dispatchers.IO)
             .stateIn(
                 viewModelScope,
                 SharingStarted.Lazily,
                 State(),
             )
+
+    fun refresh() {
+        refreshTrigger.value += 1
+    }
 
     private fun buildState(): State =
         State(
