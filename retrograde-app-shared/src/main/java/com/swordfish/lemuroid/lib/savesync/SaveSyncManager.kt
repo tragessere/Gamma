@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Context
 import com.swordfish.lemuroid.lib.library.CoreID
 import com.swordfish.lemuroid.lib.library.GameSystem
+import kotlinx.coroutines.flow.StateFlow
 import java.io.File
 
 /**
@@ -15,6 +16,11 @@ import java.io.File
 data class SaveSyncResult(
     /** Custom artwork files this sync downloaded, replaced or removed locally. */
     val changedCovers: Set<File> = emptySet(),
+    /**
+     * Paths this sync refused to decide on because both sides had changed. Neither copy was touched,
+     * and they will keep being reported until the user picks a winner.
+     */
+    val conflicts: List<SaveSyncConflict> = emptyList(),
 )
 
 abstract class SaveSyncManager {
@@ -31,6 +37,17 @@ abstract class SaveSyncManager {
     abstract fun getConfigInfo(): String
 
     abstract suspend fun sync(cores: Set<CoreID>): SaveSyncResult
+
+    /** Conflicts still waiting on the user, kept up to date as syncs detect and clear them. */
+    abstract fun pendingConflicts(): StateFlow<List<SaveSyncConflict>>
+
+    /**
+     * Records which copy to keep for each conflict, keyed by [SaveSyncConflict.id].
+     *
+     * Applying a choice means transferring a file, so this only stores the decision. Callers have to
+     * start a sync afterwards for it to take effect.
+     */
+    abstract suspend fun requestConflictResolutions(resolutions: Map<String, ConflictResolution>)
 
     abstract fun computeSavesSpace(): String
 

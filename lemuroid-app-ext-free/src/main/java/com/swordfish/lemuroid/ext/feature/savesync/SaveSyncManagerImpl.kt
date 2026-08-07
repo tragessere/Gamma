@@ -3,9 +3,14 @@ package com.swordfish.lemuroid.ext.feature.savesync
 import android.app.Activity
 import android.content.Context
 import com.swordfish.lemuroid.lib.library.CoreID
+import com.swordfish.lemuroid.lib.savesync.ConflictResolution
+import com.swordfish.lemuroid.lib.savesync.SaveSyncConflict
 import com.swordfish.lemuroid.lib.savesync.SaveSyncManager
 import com.swordfish.lemuroid.lib.savesync.SaveSyncResult
 import com.swordfish.lemuroid.lib.storage.DirectoriesManager
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 class SaveSyncManagerImpl(
     private val appContext: Context,
@@ -25,7 +30,15 @@ class SaveSyncManagerImpl(
 
     override suspend fun sync(cores: Set<CoreID>) = SaveSyncResult()
 
+    override fun pendingConflicts(): StateFlow<List<SaveSyncConflict>> = noConflicts
+
+    override suspend fun requestConflictResolutions(resolutions: Map<String, ConflictResolution>) = Unit
+
     override fun computeSavesSpace() = ""
 
     override fun computeStatesSpace(coreID: CoreID) = ""
+
+    private companion object {
+        val noConflicts = MutableStateFlow<List<SaveSyncConflict>>(emptyList()).asStateFlow()
+    }
 }

@@ -113,7 +113,7 @@ class SaveSyncWork(
     private suspend fun shouldScheduleThisSync(): Boolean {
         val isAutoSync = inputData.getBoolean(IS_AUTO, false)
         val isManualSync = !isAutoSync
-        return settingsManager.autoSaveSync() && isAutoSync || isManualSync
+        return (settingsManager.autoSaveSync() && isAutoSync) || isManualSync
     }
 
     companion object {

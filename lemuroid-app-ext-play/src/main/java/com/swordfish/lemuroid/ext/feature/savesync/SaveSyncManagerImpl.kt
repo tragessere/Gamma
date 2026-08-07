@@ -12,10 +12,14 @@ import com.swordfish.lemuroid.common.kotlin.calculateMd5
 import com.swordfish.lemuroid.ext.R
 import com.swordfish.lemuroid.lib.library.CoreID
 import com.swordfish.lemuroid.lib.preferences.SharedPreferencesHelper
+import com.swordfish.lemuroid.lib.savesync.ConflictResolution
+import com.swordfish.lemuroid.lib.savesync.SaveSyncConflict
+import com.swordfish.lemuroid.lib.savesync.SaveSyncConflictStore
 import com.swordfish.lemuroid.lib.savesync.SaveSyncManager
 import com.swordfish.lemuroid.lib.savesync.SaveSyncResult
 import com.swordfish.lemuroid.lib.storage.DirectoriesManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
 import timber.log.Timber
 import java.io.File
@@ -36,9 +40,12 @@ class SaveSyncManagerImpl(
     private val syncBaselineStore =
         SyncBaselineStore(File(appContext.filesDir, SyncBaselineStore.BASELINE_FILE_NAME))
 
+    private val conflictStore =
+        SaveSyncConflictStore(File(appContext.filesDir, SaveSyncConflictStore.CONFLICTS_FILE_NAME))
+
     override fun getProvider(): String = "Google Drive"
 
-    override fun getSettingsActivity(): Class<out Activity>? = ActivateGoogleDriveActivity::class.java
+    override fun getSettingsActivity(): Class<out Activity> = ActivateGoogleDriveActivity::class.java
 
     override fun isSupported(): Boolean = true
 
@@ -76,47 +83,74 @@ class SaveSyncManagerImpl(
         }
 
     private fun performSaveSyncForCores(cores: Set<CoreID>): SaveSyncResult {
+        val startedAt = System.currentTimeMillis()
         val drive = DriveFactory(appContext).create() ?: return SaveSyncResult()
 
-        syncLocalAndRemoteFolder(
-            drive,
-            SAVES_FOLDER,
-            directoriesManager.getSavesDirectory(),
-            null,
-        )
+        // One listing of the whole space serves every folder below. Looking each folder up and then
+        // listing its contents separately cost two round trips per folder before a single byte moved,
+        // which is most of what a sync with nothing to do used to spend its time on.
+        val remote = fetchRemoteSnapshot(drive)
+
+        val conflicts = mutableListOf<SaveSyncConflict>()
+
+        conflicts +=
+            syncLocalAndRemoteFolder(
+                drive,
+                remote,
+                SAVES_FOLDER,
+                directoriesManager.getSavesDirectory(),
+                null,
+            ).conflicts
 
         // Custom artwork rides along with the saves. It is small, and a cover the user picked is
         // just as much theirs as a save is.
         val coversDirectory = directoriesManager.getCoversDirectory()
-        val changedCovers =
+        val coversOutcome =
             syncLocalAndRemoteFolder(
                 drive,
+                remote,
                 COVERS_FOLDER,
                 coversDirectory,
                 null,
-            ).map { File(coversDirectory, it) }
+            )
+        val changedCovers =
+            coversOutcome.locallyChangedPaths
+                .map { File(coversDirectory, it) }
                 .toSet()
+        conflicts += coversOutcome.conflicts
 
         if (cores.isNotEmpty()) {
             val corePrefixes = cores.map { it.coreName }.toSet()
 
-            syncLocalAndRemoteFolder(
-                drive,
-                STATES_FOLDER,
-                directoriesManager.getStatesDirectory(),
-                corePrefixes,
-            )
-            syncLocalAndRemoteFolder(
-                drive,
-                STATE_PREVIEWS_FOLDER,
-                directoriesManager.getStatesPreviewDirectory(),
-                corePrefixes,
-            )
+            conflicts +=
+                syncLocalAndRemoteFolder(
+                    drive,
+                    remote,
+                    STATES_FOLDER,
+                    directoriesManager.getStatesDirectory(),
+                    corePrefixes,
+                ).conflicts
+            conflicts +=
+                syncLocalAndRemoteFolder(
+                    drive,
+                    remote,
+                    STATE_PREVIEWS_FOLDER,
+                    directoriesManager.getStatesPreviewDirectory(),
+                    corePrefixes,
+                ).conflicts
         }
 
         lastSyncTimestamp = System.currentTimeMillis()
-        return SaveSyncResult(changedCovers)
+        Timber.i("Save sync took ${lastSyncTimestamp - startedAt}ms, ${conflicts.size} conflicts pending")
+        return SaveSyncResult(changedCovers, conflicts)
     }
+
+    override fun pendingConflicts(): StateFlow<List<SaveSyncConflict>> = conflictStore.observeConflicts()
+
+    override suspend fun requestConflictResolutions(resolutions: Map<String, ConflictResolution>) =
+        withContext(Dispatchers.IO) {
+            conflictStore.requestResolutions(resolutions)
+        }
 
     override fun computeSavesSpace() = getSizeHumanReadable(directoriesManager.getSavesDirectory())
 
@@ -132,24 +166,48 @@ class SaveSyncManagerImpl(
             .formatShortFileSize(appContext, size)
     }
 
-    /** Returns the relative paths whose local copy this sync created, replaced or removed. */
+    /** What syncing one folder changed locally, and what it could not decide on its own. */
+    private data class FolderSyncOutcome(
+        /** Relative paths whose local copy this sync created, replaced or removed. */
+        val locallyChangedPaths: Set<String>,
+        val conflicts: List<SaveSyncConflict>,
+    )
+
     private fun syncLocalAndRemoteFolder(
         drive: Drive,
+        remote: RemoteSnapshot,
         folderName: String,
         localFolder: File,
         prefixes: Set<String>?,
-    ): Set<String> {
-        val remoteFolderId = getOrCreateAppDataFolder(folderName)
-        val remoteFilesMap = buildRemoteFileMap(getRemoteFiles(drive, remoteFolderId))
-        val localFilesMap = buildLocalFileMap(localFolder)
-
+    ): FolderSyncOutcome {
         val previousBaseline = syncBaselineStore.read(folderName)
+        val previousConflicts = conflictStore.readConflicts(folderName)
+        val previousResolutions = conflictStore.readResolutions(folderName)
+
+        val remoteFolderId =
+            remote.folderIds[folderName] ?: run {
+                // A folder we have synced before cannot simply be absent. Reading a missing listing
+                // as "the remote is empty" would hand every file in it to the deletion path, so leave
+                // the whole folder untouched and wait for a sync which can see it again.
+                if (previousBaseline.isNotEmpty()) {
+                    Timber.e("Remote folder $folderName is missing. Skipping it rather than syncing against nothing.")
+                    return FolderSyncOutcome(emptySet(), previousConflicts.values.toList())
+                }
+                createAppDataFolder(drive, folderName)
+            }
+
+        val remoteFilesMap = remote.filesByFolderId[remoteFolderId] ?: emptyMap()
+        val localFilesMap = buildLocalFileMap(localFolder)
         val processedKeys = getFilteredKeys(remoteFilesMap.keys + localFilesMap.keys, prefixes)
 
-        // Paths outside the current prefix filter were not looked at, so their baseline has to be
-        // carried over untouched rather than dropped.
+        // Paths outside the current prefix filter were not looked at, so what the stores remember
+        // about them has to be carried over untouched rather than dropped. Everything processed is
+        // recomputed from scratch below, which is also what prunes conflicts that are no longer real.
         val updatedBaseline = previousBaseline.filterKeys { it !in processedKeys }.toMutableMap()
+        val updatedConflicts = previousConflicts.filterKeys { it !in processedKeys }.toMutableMap()
         val locallyChangedPaths = mutableSetOf<String>()
+        // Reported rather than rewritten, so a choice made while this sync was running survives.
+        val consumedResolutions = mutableSetOf<String>()
 
         processedKeys.forEach { relativePath ->
             val outcome =
@@ -157,13 +215,28 @@ class SaveSyncManagerImpl(
                     drive = drive,
                     remoteParentFolderId = remoteFolderId,
                     localParentFolder = localFolder,
+                    folderName = folderName,
                     relativePath = relativePath,
                     remoteFile = remoteFilesMap[relativePath],
-                    baseline = previousBaseline[relativePath],
+                    previous =
+                        PathSyncState(
+                            baseline = previousBaseline[relativePath],
+                            conflict = previousConflicts[relativePath],
+                            resolution = previousResolutions[relativePath],
+                        ),
                 )
 
             if (outcome.baseline != null) {
                 updatedBaseline[relativePath] = outcome.baseline
+            }
+
+            if (outcome.conflict != null) {
+                updatedConflicts[relativePath] = outcome.conflict
+            }
+
+            // Anything not handed back was either carried out or found to no longer apply.
+            if (previousResolutions[relativePath] != null && outcome.resolution == null) {
+                consumedResolutions.add(relativePath)
             }
 
             if (outcome.localChanged) {
@@ -172,7 +245,9 @@ class SaveSyncManagerImpl(
         }
 
         syncBaselineStore.write(folderName, updatedBaseline)
-        return locallyChangedPaths
+        conflictStore.writeFolder(folderName, updatedConflicts, consumedResolutions)
+
+        return FolderSyncOutcome(locallyChangedPaths, updatedConflicts.values.toList())
     }
 
     private fun getFilteredKeys(
@@ -183,14 +258,30 @@ class SaveSyncManagerImpl(
         return keys.filter { key -> prefixes.any { key.startsWith(it) } }.toSet()
     }
 
+    /** What the stores remembered about a path before this sync looked at it. */
+    private data class PathSyncState(
+        val baseline: BaselineEntry?,
+        val conflict: SaveSyncConflict?,
+        val resolution: ConflictResolution?,
+    )
+
     /**
      * The baseline entry a path should carry from now on (null when it is gone on both sides), plus
      * whether the local copy was touched, which callers use to invalidate anything derived from it.
+     *
+     * [conflict] and [resolution] work the same way: whatever is returned here is what the stores
+     * will remember, so leaving them null is how a conflict gets cleared.
      */
     private data class FileSyncOutcome(
         val baseline: BaselineEntry?,
         val localChanged: Boolean = false,
+        val conflict: SaveSyncConflict? = null,
+        val resolution: ConflictResolution? = null,
     )
+
+    /** Leaves both copies and everything remembered about the path exactly as they were. */
+    private fun unchanged(previous: PathSyncState) =
+        FileSyncOutcome(previous.baseline, conflict = previous.conflict, resolution = previous.resolution)
 
     /**
      * Decides what to do with a single path by comparing both sides against the state they had at
@@ -200,9 +291,10 @@ class SaveSyncManagerImpl(
         drive: Drive,
         remoteParentFolderId: String,
         localParentFolder: File,
+        folderName: String,
         relativePath: String,
         remoteFile: DriveFile?,
-        baseline: BaselineEntry?,
+        previous: PathSyncState,
     ): FileSyncOutcome {
         val localFile = File(localParentFolder, relativePath)
         val localExists = localFile.isFile
@@ -212,51 +304,175 @@ class SaveSyncManagerImpl(
         // An empty file is either a write which was interrupted half way through or the inert zero
         // byte remote which downloadToLocal refuses to fetch. Never let one of those be read as a
         // deletion, or an interrupted write would take the last remaining copy with it.
-        if (localExists && localFile.length() == 0L) return FileSyncOutcome(baseline)
-        if (remoteFile != null && remoteSize(remoteFile) == 0L) return FileSyncOutcome(baseline)
+        if (localExists && localFile.length() == 0L) return unchanged(previous)
+        if (remoteFile != null && remoteSize(remoteFile) == 0L) return unchanged(previous)
 
         return runCatching {
-            when {
-                remoteFile != null && localExists -> syncExistingPair(drive, remoteFile, localFile)
-                remoteFile != null -> syncRemoteOnly(drive, remoteFile, localFile, baseline)
-                localExists -> syncLocalOnly(drive, remoteParentFolderId, localParentFolder, localFile, baseline)
+            val resolved =
+                applyPendingResolution(
+                    drive = drive,
+                    localFile = localFile,
+                    remoteFile = remoteFile,
+                    previous = previous,
+                )
+
+            resolved ?: when {
+                remoteFile != null && localExists ->
+                    syncExistingPair(drive, remoteFile, localFile, folderName, relativePath, previous)
+                remoteFile != null -> syncRemoteOnly(drive, remoteFile, localFile, previous.baseline)
+                localExists ->
+                    syncLocalOnly(drive, remoteParentFolderId, localParentFolder, localFile, previous.baseline)
                 else -> FileSyncOutcome(null)
             }
         }.getOrElse {
             Timber.e(it, "Error while syncing $relativePath")
-            // Keep the previous baseline so a failed operation is never recorded as a success.
-            FileSyncOutcome(baseline)
+            // Keep everything the path had before, so a failed operation is never recorded as a
+            // success and a decision the user already made is not silently thrown away.
+            unchanged(previous)
         }
     }
 
-    /** Present on both sides: the newer copy wins. */
-    private fun syncExistingPair(
+    /**
+     * Carries out a choice the user made earlier, or returns null to let the normal merge run.
+     *
+     * The decision is only honoured while both sides still look the way they did when it was
+     * presented. If either has moved on the choice no longer describes what the user was asked
+     * about, so it is dropped and the divergence is worked out again from the current state.
+     */
+    private fun applyPendingResolution(
         drive: Drive,
-        remoteFile: DriveFile,
         localFile: File,
-    ): FileSyncOutcome {
-        if (!areFileDifferent(remoteFile, localFile)) {
-            return FileSyncOutcome(entryFor(localFile, remoteFile.modifiedTime.value))
+        remoteFile: DriveFile?,
+        previous: PathSyncState,
+    ): FileSyncOutcome? {
+        val resolution = previous.resolution ?: return null
+        val conflict = previous.conflict ?: return null
+
+        // Every resolution weighs one copy against the other, so a side which has gone missing
+        // entirely is enough on its own to make the decision no longer meaningful.
+        val stillMatches =
+            remoteFile != null &&
+                localFile.isFile &&
+                localFile.length() == conflict.localSize &&
+                localFile.lastModified() == conflict.localModifiedAt &&
+                remoteSize(remoteFile) == conflict.remoteSize &&
+                remoteFile.modifiedTime.value == conflict.remoteModifiedAt
+
+        if (!stillMatches) {
+            Timber.i("Discarding stale $resolution for ${conflict.relativePath}. Re-detecting.")
+            return null
         }
 
-        return when {
-            remoteFile.modifiedTime.value < localFile.lastModified() -> {
+        Timber.i("Applying $resolution for ${conflict.relativePath}")
+
+        return when (resolution) {
+            ConflictResolution.KEEP_LOCAL -> {
                 val updated = onLocalUpdated(localFile, drive, remoteFile)
                 FileSyncOutcome(entryFor(localFile, updated.modifiedTime.value))
             }
 
-            remoteFile.modifiedTime.value > localFile.lastModified() -> {
+            ConflictResolution.KEEP_REMOTE -> {
+                onRemoteUpdated(drive, remoteFile, localFile)
+                FileSyncOutcome(entryFor(localFile, remoteFile.modifiedTime.value), localChanged = true)
+            }
+
+            ConflictResolution.DELETE_BOTH -> {
+                trashRemote(drive, remoteFile)
+                localFile.safeDelete()
+                // Both sides are gone and the baseline goes with them, so the path is simply absent
+                // everywhere rather than looking like a deletion still waiting to propagate.
+                FileSyncOutcome(null, localChanged = true)
+            }
+        }
+    }
+
+    /**
+     * Present on both sides. Whichever side moved since the last agreement is the one with something
+     * to say; if they both did, only the user can settle it.
+     */
+    private fun syncExistingPair(
+        drive: Drive,
+        remoteFile: DriveFile,
+        localFile: File,
+        folderName: String,
+        relativePath: String,
+        previous: PathSyncState,
+    ): FileSyncOutcome {
+        val baseline = previous.baseline
+
+        if (!areFileDifferent(remoteFile, localFile)) {
+            // Identical content needs no decision even when there is no baseline yet, which is what
+            // keeps a device that simply enabled sync from being asked about files it already agrees
+            // on.
+            return FileSyncOutcome(entryFor(localFile, remoteFile.modifiedTime.value))
+        }
+
+        // With no baseline there is no agreement to measure against, so both sides count as changed.
+        val localDiverged = baseline == null || !baseline.matchesLocal(localFile)
+        val remoteDiverged = baseline == null || !baseline.matchesRemote(remoteFile)
+
+        return when {
+            localDiverged && remoteDiverged ->
+                conflictOutcome(remoteFile, localFile, folderName, relativePath, previous)
+
+            localDiverged -> {
+                val updated = onLocalUpdated(localFile, drive, remoteFile)
+                FileSyncOutcome(entryFor(localFile, updated.modifiedTime.value))
+            }
+
+            remoteDiverged -> {
                 onRemoteUpdated(drive, remoteFile, localFile)
                 // The local content was replaced in place, so the path stayed the same while what
                 // it holds did not.
                 FileSyncOutcome(entryFor(localFile, remoteFile.modifiedTime.value), localChanged = true)
             }
 
-            // Same timestamp but different content. Leave it alone rather than guess a winner.
-            else -> {
-                FileSyncOutcome(entryFor(localFile, remoteFile.modifiedTime.value))
-            }
+            // The baseline claims both sides still agree, yet the content differs. Something wrote
+            // without moving a timestamp, so the baseline is the thing that is wrong. Hand it to the
+            // user rather than trust either side.
+            else -> conflictOutcome(remoteFile, localFile, folderName, relativePath, previous)
         }
+    }
+
+    /**
+     * Parks a path instead of touching either copy. The baseline is deliberately left where it was,
+     * which makes the same divergence show up again on every sync until it is resolved and costs
+     * nothing but the comparison.
+     */
+    private fun conflictOutcome(
+        remoteFile: DriveFile,
+        localFile: File,
+        folderName: String,
+        relativePath: String,
+        previous: PathSyncState,
+    ): FileSyncOutcome {
+        val conflict =
+            SaveSyncConflict(
+                folder = folderName,
+                relativePath = relativePath,
+                localSize = localFile.length(),
+                localModifiedAt = localFile.lastModified(),
+                remoteSize = remoteSize(remoteFile),
+                remoteModifiedAt = remoteFile.modifiedTime.value,
+                detectedAt = System.currentTimeMillis(),
+            )
+
+        // Re-detecting the same divergence keeps the original timestamp, so "in conflict since" does
+        // not creep forward on every sync.
+        val previousConflict = previous.conflict
+        val isSameConflict =
+            previousConflict != null &&
+                previousConflict.localSize == conflict.localSize &&
+                previousConflict.localModifiedAt == conflict.localModifiedAt &&
+                previousConflict.remoteSize == conflict.remoteSize &&
+                previousConflict.remoteModifiedAt == conflict.remoteModifiedAt
+
+        Timber.i("Conflict on $folderName/$relativePath (new=${!isSameConflict})")
+
+        return FileSyncOutcome(
+            baseline = previous.baseline,
+            conflict = if (isSameConflict) previousConflict else conflict,
+        )
     }
 
     /**
@@ -339,16 +555,21 @@ class SaveSyncManagerImpl(
             .execute()
     }
 
+    /**
+     * Size is checked before the timestamps so that a pair which differs in length is never waved
+     * through on the strength of a matching timestamp. Equal timestamps are still taken as proof of
+     * equal content beyond that, which is what keeps a sync from hashing every file it looks at.
+     */
     private fun areFileDifferent(
         remoteFile: DriveFile,
         localFile: File,
     ): Boolean {
-        if (remoteFile.modifiedTime.value == localFile.lastModified()) {
-            return false
-        }
-
         if (remoteSize(remoteFile) != localFile.length()) {
             return true
+        }
+
+        if (remoteFile.modifiedTime.value == localFile.lastModified()) {
+            return false
         }
 
         return remoteFile.md5Checksum != localFile.calculateMd5()
@@ -361,7 +582,7 @@ class SaveSyncManagerImpl(
     ): DriveFile {
         Timber.i("Local file updated $localFile")
 
-        val mediaContent = FileContent("application/x-binary", localFile)
+        val mediaContent = FileContent(BINARY_MIME_TYPE, localFile)
         val metadata = DriveFile()
         metadata.modifiedTime = DateTime(localFile.lastModified())
         return drive
@@ -390,7 +611,7 @@ class SaveSyncManagerImpl(
                     ),
             )
         metadata.modifiedTime = DateTime(localFile.lastModified())
-        val mediaContent = FileContent("application/x-binary", localFile)
+        val mediaContent = FileContent(BINARY_MIME_TYPE, localFile)
         return drive
             .files()
             .create(metadata, mediaContent)
@@ -423,12 +644,6 @@ class SaveSyncManagerImpl(
         localFile.setLastModified(remoteFile.modifiedTime.value)
     }
 
-    private fun buildRemoteFileMap(remoteFiles: Sequence<DriveFile>): Map<String, DriveFile> =
-        remoteFiles
-            .filter { it.appProperties?.get(GDRIVE_PROPERTY_LOCAL_PATH) != null }
-            .map { it.appProperties?.get(GDRIVE_PROPERTY_LOCAL_PATH)!! to it }
-            .toMap()
-
     // Empty files are deliberately kept here. Filtering them out would make a half written save
     // indistinguishable from a missing one, which the three way merge would read as a deletion.
     private fun buildLocalFileMap(folder: File): Map<String, File> =
@@ -438,68 +653,84 @@ class SaveSyncManagerImpl(
             .map { it.toRelativeString(folder) to it }
             .toMap()
 
-    private fun getOrCreateAppDataFolder(folderName: String): String {
-        val drive =
-            DriveFactory(appContext).create()
-                ?: throw UnsupportedOperationException()
+    /** Everything the remote holds, read in one pass. */
+    private data class RemoteSnapshot(
+        /** Synced folder name to its Drive id. */
+        val folderIds: Map<String, String>,
+        /** Drive folder id to the files it holds, keyed by their path relative to that folder. */
+        val filesByFolderId: Map<String, Map<String, DriveFile>>,
+    )
 
-        val query =
-            drive
-                .files()
-                .list()
-                .setSpaces("appDataFolder")
-                .setQ("name = '$folderName' and mimeType = 'application/vnd.google-apps.folder'")
-                .setFields("files(id)")
-                .execute()
+    /**
+     * Lists the whole app data space once and sorts the result out locally. The folders and the files
+     * they hold come back together, which is also why no folder id needs caching: a cached id which
+     * had gone stale would produce an empty listing, and an empty listing is indistinguishable from a
+     * remote where everything was deleted.
+     */
+    private fun fetchRemoteSnapshot(drive: Drive): RemoteSnapshot {
+        val foldersByName = mutableMapOf<String, MutableList<String>>()
+        val filesByFolderId = mutableMapOf<String, MutableMap<String, DriveFile>>()
 
-        if (query.files.size > 0) {
-            return query.files[0].id
-        }
+        var pageToken: String? = null
+        do {
+            val result =
+                drive
+                    .files()
+                    .list()
+                    .setPageSize(1000)
+                    .setSpaces(APP_DATA_SPACE)
+                    .setQ(SNAPSHOT_QUERY)
+                    .setFields(SNAPSHOT_FIELDS)
+                    .setPageToken(pageToken)
+                    .execute()
 
-        val metadata = DriveFile()
-        metadata.parents = listOf("appDataFolder")
-        metadata.name = folderName
-        metadata.mimeType = "application/vnd.google-apps.folder"
+            result.files.forEach { file ->
+                if (file.mimeType == FOLDER_MIME_TYPE) {
+                    foldersByName.getOrPut(file.name) { mutableListOf() }.add(file.id)
+                    return@forEach
+                }
 
-        val file =
-            drive
-                .files()
-                .create(metadata)
-                .setFields("id")
-                .execute()
+                val localPath = file.appProperties?.get(GDRIVE_PROPERTY_LOCAL_PATH) ?: return@forEach
+                val parentId = file.parents?.firstOrNull() ?: return@forEach
+                filesByFolderId.getOrPut(parentId) { mutableMapOf() }[localPath] = file
+            }
 
-        return file.id
+            pageToken = result.nextPageToken
+        } while (pageToken != null)
+
+        val folderIds =
+            foldersByName.mapValues { (folderName, ids) ->
+                if (ids.size > 1) {
+                    Timber.w("Found ${ids.size} remote folders named $folderName. Using the fullest one.")
+                }
+                // Two devices syncing for the first time at once can each create the same folder.
+                // Preferring the one holding the most files keeps whichever copy is actually in use,
+                // and the id break makes every device settle on the same answer.
+                ids.maxWithOrNull(
+                    compareBy<String> { filesByFolderId[it]?.size ?: 0 }.thenByDescending { it },
+                )!!
+            }
+
+        return RemoteSnapshot(folderIds, filesByFolderId)
     }
 
-    private fun getRemoteFiles(
+    private fun createAppDataFolder(
         drive: Drive,
-        folderId: String,
-    ): Sequence<DriveFile> {
-        var pageToken: String? = null
-        return sequence {
-            do {
-                val query =
-                    "'$folderId' in parents and trashed = false and mimeType = 'application/x-binary'"
+        folderName: String,
+    ): String {
+        Timber.i("Creating remote folder $folderName")
 
-                val fields =
-                    "nextPageToken, " +
-                        "files(id, name, size, appProperties, modifiedTime, parents, md5Checksum)"
+        val metadata = DriveFile()
+        metadata.parents = listOf(APP_DATA_SPACE)
+        metadata.name = folderName
+        metadata.mimeType = FOLDER_MIME_TYPE
 
-                val result =
-                    drive
-                        .files()
-                        .list()
-                        .setPageSize(500)
-                        .setSpaces("appDataFolder")
-                        .setQ(query)
-                        .setFields(fields)
-                        .setPageToken(pageToken)
-                        .execute()
-
-                yieldAll(result.files)
-                pageToken = result.nextPageToken
-            } while (pageToken != null)
-        }
+        return drive
+            .files()
+            .create(metadata)
+            .setFields("id")
+            .execute()
+            .id
     }
 
     companion object {
@@ -512,6 +743,19 @@ class SaveSyncManagerImpl(
 
         /** Requested on writes so the baseline can record the timestamp Drive actually stored. */
         private const val REMOTE_FILE_FIELDS = "id, size, modifiedTime"
+
+        private const val APP_DATA_SPACE = "appDataFolder"
+        private const val FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
+        private const val BINARY_MIME_TYPE = "application/x-binary"
+
+        /** Folders and saved files in one query, so the space can be read in a single pass. */
+        private const val SNAPSHOT_QUERY =
+            "trashed = false and " +
+                "(mimeType = '$FOLDER_MIME_TYPE' or mimeType = '$BINARY_MIME_TYPE')"
+
+        private const val SNAPSHOT_FIELDS =
+            "nextPageToken, " +
+                "files(id, name, mimeType, size, appProperties, modifiedTime, parents, md5Checksum)"
 
         private val SYNC_LOCK = Object()
     }
