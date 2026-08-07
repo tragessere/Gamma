@@ -9,7 +9,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.Lifecycle
+import androidx.navigation.NavController
 import com.swordfish.lemuroid.R
+import com.swordfish.lemuroid.app.mobile.feature.main.MainRoute
+import com.swordfish.lemuroid.app.mobile.feature.main.navigateToRoute
 import com.swordfish.lemuroid.app.shared.savesync.SaveSyncWork
 import com.swordfish.lemuroid.app.utils.android.ComposableLifecycle
 import com.swordfish.lemuroid.app.utils.android.settings.LemuroidCardSettingsGroup
@@ -24,6 +27,7 @@ import com.swordfish.lemuroid.app.utils.android.settings.stringsSetPreferenceSta
 fun SaveSyncSettingsScreen(
     modifier: Modifier = Modifier,
     viewModel: SaveSyncSettingsViewModel,
+    navController: NavController,
 ) {
     val context = LocalContext.current
 
@@ -41,6 +45,11 @@ fun SaveSyncSettingsScreen(
     val isSyncInProgress =
         viewModel.saveSyncInProgress
             .collectAsState(true)
+            .value
+
+    val conflictCount =
+        viewModel.pendingConflictCount
+            .collectAsState()
             .value
 
     LemuroidSettingsPage(modifier = modifier.fillMaxSize()) {
@@ -106,6 +115,16 @@ fun SaveSyncSettingsScreen(
                 enabled = saveSyncState.isConfigured && !isSyncInProgress,
                 onClick = { SaveSyncWork.enqueueManualWork(context) },
             )
+            // Only worth a row when there is something to answer. Conflicts are the exception, not a
+            // setting, and an always present "no conflicts" row would just be noise.
+            if (conflictCount > 0) {
+                LemuroidSettingsMenuLink(
+                    title = { Text(text = stringResource(id = R.string.settings_save_sync_conflicts)) },
+                    subtitle = { Text(text = saveSyncConflictsSubtitle(conflictCount)) },
+                    enabled = !isSyncInProgress,
+                    onClick = { navController.navigateToRoute(MainRoute.SETTINGS_SAVE_SYNC_CONFLICTS) },
+                )
+            }
         }
     }
 }

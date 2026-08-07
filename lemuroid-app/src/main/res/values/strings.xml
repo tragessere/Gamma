@@ -108,6 +108,24 @@
     <string name="settings_save_sync_include_states">Sync states</string>
     <string name="settings_save_sync_include_states_description">More convenient, but heavier and less reliable. Choose which cores/systems you want to sync</string>
 
+    <string name="settings_title_save_sync_conflicts">Resolve conflicts</string>
+    <string name="settings_save_sync_conflicts">Conflicts</string>
+    <plurals name="settings_save_sync_conflicts_description">
+        <item quantity="one">%1$d save changed on this device and in the cloud. Choose which to keep</item>
+        <item quantity="other">%1$d saves changed on this device and in the cloud. Choose which to keep</item>
+    </plurals>
+    <string name="settings_save_sync_conflicts_none">No conflicts to resolve</string>
+    <string name="save_sync_conflicts_explanation">These files were changed on this device and in the cloud. Pick which one you would like to keep.</string>
+    <string name="save_sync_conflicts_keep_local">Keep the local copy</string>
+    <string name="save_sync_conflicts_keep_remote">Keep the cloud copy</string>
+    <string name="save_sync_conflicts_apply">Apply and sync</string>
+    <string name="save_sync_conflicts_detail">%1$s · %2$s</string>
+    <string name="save_sync_conflicts_kind_save_data">Save data</string>
+    <string name="save_sync_conflicts_kind_auto_save">Auto save</string>
+    <string name="save_sync_conflicts_kind_slot">Slot %1$d</string>
+    <string name="save_sync_conflicts_kind_cover">Cover image</string>
+    <string name="save_sync_conflicts_kind_other">Synced file</string>
+
     <string name="game_context_menu_add_to_favorites">Add to favorites</string>
     <string name="game_context_menu_remove_from_favorites">Remove from favorites</string>
     <string name="game_context_menu_resume">Resume</string>

@@ -15,6 +15,7 @@ import com.swordfish.lemuroid.lib.preferences.SharedPreferencesHelper
 import com.swordfish.lemuroid.lib.savesync.ConflictResolution
 import com.swordfish.lemuroid.lib.savesync.SaveSyncConflict
 import com.swordfish.lemuroid.lib.savesync.SaveSyncConflictStore
+import com.swordfish.lemuroid.lib.savesync.SaveSyncFolders
 import com.swordfish.lemuroid.lib.savesync.SaveSyncManager
 import com.swordfish.lemuroid.lib.savesync.SaveSyncResult
 import com.swordfish.lemuroid.lib.storage.DirectoriesManager
@@ -375,14 +376,6 @@ class SaveSyncManagerImpl(
                 onRemoteUpdated(drive, remoteFile, localFile)
                 FileSyncOutcome(entryFor(localFile, remoteFile.modifiedTime.value), localChanged = true)
             }
-
-            ConflictResolution.DELETE_BOTH -> {
-                trashRemote(drive, remoteFile)
-                localFile.safeDelete()
-                // Both sides are gone and the baseline goes with them, so the path is simply absent
-                // everywhere rather than looking like a deletion still waiting to propagate.
-                FileSyncOutcome(null, localChanged = true)
-            }
         }
     }
 
@@ -736,10 +729,10 @@ class SaveSyncManagerImpl(
     companion object {
         const val GDRIVE_PROPERTY_LOCAL_PATH = "localPath"
 
-        private const val SAVES_FOLDER = "saves"
-        private const val COVERS_FOLDER = "covers"
-        private const val STATES_FOLDER = "states"
-        private const val STATE_PREVIEWS_FOLDER = "state-previews"
+        private const val SAVES_FOLDER = SaveSyncFolders.SAVES
+        private const val COVERS_FOLDER = SaveSyncFolders.COVERS
+        private const val STATES_FOLDER = SaveSyncFolders.STATES
+        private const val STATE_PREVIEWS_FOLDER = SaveSyncFolders.STATE_PREVIEWS
 
         /** Requested on writes so the baseline can record the timestamp Drive actually stored. */
         private const val REMOTE_FILE_FIELDS = "id, size, modifiedTime"

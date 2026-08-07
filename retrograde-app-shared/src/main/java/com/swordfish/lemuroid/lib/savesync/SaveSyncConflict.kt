@@ -1,6 +1,17 @@
 package com.swordfish.lemuroid.lib.savesync
 
 /**
+ * The folders a sync keeps in step, named here because a conflict is reported against one of them and
+ * whatever displays it has to know how to read the paths inside.
+ */
+object SaveSyncFolders {
+    const val SAVES = "saves"
+    const val COVERS = "covers"
+    const val STATES = "states"
+    const val STATE_PREVIEWS = "state-previews"
+}
+
+/**
  * A path whose local and remote copies both moved on since they last agreed, which makes picking a
  * winner a guess only the user can make.
  *
@@ -34,12 +45,12 @@ data class SaveSyncConflict(
 /**
  * Which copy of a conflicted path the user chose to keep.
  *
- * [DELETE_BOTH] exists because a conflict cannot otherwise be got rid of: deleting the local copy of
- * a conflicted path only makes the next sync see a remote it has no agreement with, which it
- * resurrects rather than treats as an intentional deletion.
+ * There is deliberately no "delete both": a conflict only ever arises with a file present on both
+ * sides, so deletion is never one of the answers being weighed. Getting rid of a conflicted save
+ * means resolving it first and then deleting it as normal, which works because resolving leaves a
+ * baseline the two sides agree on for an ordinary deletion to propagate against.
  */
 enum class ConflictResolution {
     KEEP_LOCAL,
     KEEP_REMOTE,
-    DELETE_BOTH,
 }

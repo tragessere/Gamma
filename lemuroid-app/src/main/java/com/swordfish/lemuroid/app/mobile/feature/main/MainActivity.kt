@@ -47,6 +47,8 @@ import com.swordfish.lemuroid.app.mobile.feature.settings.general.SettingsScreen
 import com.swordfish.lemuroid.app.mobile.feature.settings.general.SettingsViewModel
 import com.swordfish.lemuroid.app.mobile.feature.settings.inputdevices.InputDevicesSettingsScreen
 import com.swordfish.lemuroid.app.mobile.feature.settings.inputdevices.InputDevicesSettingsViewModel
+import com.swordfish.lemuroid.app.mobile.feature.settings.savesync.SaveSyncConflictsScreen
+import com.swordfish.lemuroid.app.mobile.feature.settings.savesync.SaveSyncConflictsViewModel
 import com.swordfish.lemuroid.app.mobile.feature.settings.savesync.SaveSyncSettingsScreen
 import com.swordfish.lemuroid.app.mobile.feature.settings.savesync.SaveSyncSettingsViewModel
 import com.swordfish.lemuroid.app.mobile.feature.settings.skins.ControllerSkinsScreen
@@ -381,6 +383,21 @@ class MainActivity :
                                         SaveSyncSettingsViewModel.Factory(
                                             application,
                                             saveSyncManager,
+                                        ),
+                                ),
+                            navController = navController,
+                        )
+                    }
+                    composable(MainRoute.SETTINGS_SAVE_SYNC_CONFLICTS) {
+                        SaveSyncConflictsScreen(
+                            modifier = Modifier.padding(padding),
+                            viewModel =
+                                viewModel(
+                                    factory =
+                                        SaveSyncConflictsViewModel.Factory(
+                                            application,
+                                            saveSyncManager,
+                                            retrogradeDb,
                                         ),
                                 ),
                         )

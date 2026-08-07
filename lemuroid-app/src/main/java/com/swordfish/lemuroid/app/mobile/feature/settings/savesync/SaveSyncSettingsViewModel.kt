@@ -14,6 +14,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.flow.stateIn
 
@@ -31,6 +32,17 @@ class SaveSyncSettingsViewModel(
     }
 
     val saveSyncInProgress = PendingOperationsMonitor(getContext()).anySaveOperationInProgress()
+
+    /**
+     * Counted in saves rather than files, since a single savestate is spread over as many as three
+     * of them and reporting it as three conflicts would be nonsense. Grouping needs no game titles
+     * to work out how many there are, so the library is left out of it here.
+     */
+    val pendingConflictCount =
+        saveSyncManager
+            .pendingConflicts()
+            .map { SaveSyncConflictGrouping.group(it, emptyList()).size }
+            .stateIn(viewModelScope, SharingStarted.Lazily, 0)
 
     data class State(
         val isConfigured: Boolean = false,
