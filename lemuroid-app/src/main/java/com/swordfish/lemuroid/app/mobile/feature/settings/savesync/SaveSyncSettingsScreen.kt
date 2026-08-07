@@ -44,7 +44,7 @@ fun SaveSyncSettingsScreen(
 
     val isSyncInProgress =
         viewModel.saveSyncInProgress
-            .collectAsState(true)
+            .collectAsState()
             .value
 
     val conflictCount =

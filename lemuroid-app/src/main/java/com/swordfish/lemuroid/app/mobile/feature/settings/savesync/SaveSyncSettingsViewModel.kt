@@ -13,6 +13,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.mapLatest
@@ -31,7 +32,19 @@ class SaveSyncSettingsViewModel(
             SaveSyncSettingsViewModel(application, saveSyncManager) as T
     }
 
-    val saveSyncInProgress = PendingOperationsMonitor(getContext()).anySaveOperationInProgress()
+    /**
+     * Started eagerly rather than on first collection: WorkManager only answers asynchronously, so
+     * the sooner the query goes out the smaller the window in which we do not yet have an answer.
+     * Asking at construction usually means the real state has landed before anything composes.
+     *
+     * That window cannot be closed entirely, and it is filled with `true` because the two ways of
+     * being wrong are not equally bad. Guessing idle offers a working sync button that races the
+     * worker; guessing busy costs a moment of disabled rows.
+     */
+    val saveSyncInProgress =
+        PendingOperationsMonitor(getContext())
+            .anySaveOperationInProgress()
+            .stateIn(viewModelScope, SharingStarted.Eagerly, true)
 
     /**
      * Counted in saves rather than files, since a single savestate is spread over as many as three
@@ -57,8 +70,14 @@ class SaveSyncSettingsViewModel(
 
     private val refreshTrigger = MutableStateFlow(0)
 
+    /**
+     * Rebuilt whenever a sync starts or stops as well as on an explicit refresh, so that the last
+     * sync time is current the moment the worker finishes instead of waiting for the screen to be
+     * resumed. The worker records the timestamp before it reports success, so it is already written
+     * by the time the flow reports the sync as no longer running.
+     */
     val uiState =
-        refreshTrigger
+        combine(refreshTrigger, saveSyncInProgress) { _, _ -> }
             .mapLatest { buildState() }
             .flowOn(Dispatchers.IO)
             .stateIn(
